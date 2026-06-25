@@ -28,6 +28,16 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.tools.council  # noqa: F401
+except ImportError:
+    pass
+
+try:
+    import openjarvis.tools.mail_read  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.tools.file_read  # noqa: F401
 except ImportError:
     pass

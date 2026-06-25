@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>J.A.R.V.I.S</title>
+<style>
+  :root{
+    --cyan:#3fd0ff; --cyan-dim:#1b7fa8; --bg:#02060d; --glow:#5fe0ff;
+    --amber:#ffb547; --red:#ff5a5a; --txt:#bfeaff;
+  }
+  *{box-sizing:border-box; margin:0; padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--bg); color:var(--txt);
+    font-family:"SF Mono",ui-monospace,"Roboto Mono",Menlo,monospace;
+    overflow:hidden; user-select:none;
+    background:
+      radial-gradient(900px 700px at 50% 48%, rgba(40,120,180,.16), transparent 70%),
+      radial-gradient(1200px 900px at 50% 120%, rgba(20,80,140,.10), transparent 70%),
+      var(--bg);
+  }
+  /* faint scanlines + vignette */
+  body::after{
+    content:""; position:fixed; inset:0; pointer-events:none; z-index:50;
+    background:repeating-linear-gradient(0deg, rgba(0,0,0,0) 0 2px, rgba(0,0,0,.18) 2px 3px);
+    mix-blend-mode:overlay; opacity:.5;
+  }
+  body::before{
+    content:""; position:fixed; inset:0; pointer-events:none; z-index:49;
+    box-shadow:inset 0 0 240px 40px rgba(0,0,0,.85);
+  }
+  .grid{
+    position:fixed; inset:0; display:grid;
+    grid-template-columns: 300px 1fr 300px;
+    grid-template-rows: 56px 1fr 210px;
+    gap:14px; padding:16px; z-index:10;
+  }
+  .panel{
+    border:1px solid rgba(63,208,255,.22);
+    background:linear-gradient(180deg, rgba(10,30,50,.30), rgba(5,15,28,.18));
+    border-radius:10px; position:relative; backdrop-filter:blur(2px);
+    box-shadow:inset 0 0 30px rgba(20,90,140,.10);
+  }
+  .panel .corner{position:absolute;width:12px;height:12px;border:2px solid var(--cyan);opacity:.55}
+  .corner.tl{top:-1px;left:-1px;border-right:0;border-bottom:0}
+  .corner.tr{top:-1px;right:-1px;border-left:0;border-bottom:0}
+  .corner.bl{bottom:-1px;left:-1px;border-right:0;border-top:0}
+  .corner.br{bottom:-1px;right:-1px;border-left:0;border-top:0}
+  .label{font-size:10px;letter-spacing:3px;color:var(--cyan);opacity:.8;
+    text-transform:uppercase;padding:8px 12px;border-bottom:1px solid rgba(63,208,255,.14)}
+
+  /* top bar */
+  .top{grid-column:1 / 4; display:flex; align-items:center; gap:20px; padding:0 18px}
+  .top .brand{font-size:22px; letter-spacing:10px; color:#eafaff; text-shadow:0 0 18px var(--glow)}
+  .top .brand b{color:var(--cyan)}
+  .top .sub{font-size:10px; letter-spacing:3px; opacity:.6}
+  .top .clock{margin-left:auto; font-size:26px; letter-spacing:4px; color:#eafaff; text-shadow:0 0 16px var(--glow)}
+  .top .date{font-size:10px; letter-spacing:3px; opacity:.7; text-align:right}
+
+  /* center */
+  .center{grid-column:2; position:relative; display:flex; align-items:center; justify-content:center}
+  #reactor{width:100%; height:100%}
+  .status-ring{position:absolute; bottom:14px; left:50%; transform:translateX(-50%);
+    font-size:11px; letter-spacing:4px; color:var(--cyan); text-shadow:0 0 12px var(--glow)}
+
+  /* side panels content */
+  .readout{padding:10px 12px; font-size:11px; line-height:1.9}
+  .row{display:flex; justify-content:space-between; opacity:.9}
+  .row span:last-child{color:#eafaff}
+  .bar{height:6px; border-radius:3px; background:rgba(63,208,255,.12); overflow:hidden; margin:3px 0 9px}
+  .bar i{display:block; height:100%; background:linear-gradient(90deg,var(--cyan-dim),var(--cyan)); box-shadow:0 0 10px var(--glow)}
+  #globe{width:100%; height:240px}
+  .stat-big{font-size:34px; color:#eafaff; text-align:center; text-shadow:0 0 16px var(--glow); padding:6px}
+  .stat-big small{display:block; font-size:9px; letter-spacing:3px; opacity:.6}
+
+  /* bottom: conversation */
+  .conv{grid-column:1 / 4; display:flex; flex-direction:column; padding:10px 14px 12px}
+  .log{flex:1; overflow-y:auto; font-size:13px; line-height:1.55; padding-right:8px; scrollbar-width:thin}
+  .log .you{color:#9fe6ff}
+  .log .jv{color:#eafaff; text-shadow:0 0 6px rgba(95,224,255,.3)}
+  .log .tag{font-size:9px; letter-spacing:2px; opacity:.55; margin-right:8px}
+  .log .line{margin:4px 0; opacity:0; transform:translateY(4px); animation:rise .25s forwards}
+  @keyframes rise{to{opacity:1; transform:none}}
+  .inrow{display:flex; gap:10px; margin-top:8px; align-items:center}
+  #inp{flex:1; background:rgba(5,18,30,.7); border:1px solid rgba(63,208,255,.3); color:#eafaff;
+    padding:12px 14px; border-radius:8px; font-family:inherit; font-size:14px; outline:none;
+    box-shadow:inset 0 0 18px rgba(20,90,140,.15)}
+  #inp:focus{border-color:var(--cyan); box-shadow:0 0 16px rgba(63,208,255,.25), inset 0 0 18px rgba(20,90,140,.2)}
+  .btn{background:rgba(63,208,255,.1); border:1px solid var(--cyan); color:var(--cyan);
+    width:48px; height:48px; border-radius:50%; cursor:pointer; font-size:18px; transition:.15s;
+    display:flex; align-items:center; justify-content:center}
+  .btn:hover{background:rgba(63,208,255,.22); box-shadow:0 0 18px rgba(63,208,255,.4)}
+  .btn.live{background:var(--red); border-color:var(--red); color:#fff; animation:pulse 1s infinite}
+  @keyframes pulse{50%{box-shadow:0 0 22px var(--red)}}
+  .btn.mute{opacity:.4}
+
+  /* boot overlay */
+  #boot{position:fixed; inset:0; z-index:100; background:var(--bg); display:flex;
+    flex-direction:column; align-items:center; justify-content:center; gap:14px}
+  #boot .big{font-size:46px; letter-spacing:16px; color:#eafaff; text-shadow:0 0 24px var(--glow)}
+  #boot .lines{font-size:11px; letter-spacing:2px; color:var(--cyan); width:520px; max-width:88vw; height:150px; overflow:hidden}
+  #boot .lines div{opacity:.85}
+  .hidden{display:none !important}
+  .ok{color:#6effa6}
+</style>
+</head>
+<body>
+
+<div id="boot">
+  <div class="big">J.A.R.V.I.S</div>
+  <div class="lines" id="bootlines"></div>
+</div>
+
+<div class="grid hidden" id="ui">
+  <!-- top -->
+  <div class="panel top">
+    <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+    <div>
+      <div class="brand">J<b>.</b>A<b>.</b>R<b>.</b>V<b>.</b>I<b>.</b>S</div>
+      <div class="sub">JUST A RATHER VERY INTELLIGENT SYSTEM · LOCAL CORE</div>
+    </div>
+    <div style="margin-left:auto;text-align:right">
+      <a href="/voz" title="Limpia y archivo de notas de voz" style="display:inline-block;margin-bottom:8px;text-decoration:none;color:var(--cyan);border:1px solid rgba(63,208,255,.35);border-radius:8px;padding:7px 13px;font-size:12px;letter-spacing:2px;text-shadow:0 0 10px var(--glow)">🎙 NOTAS DE VOZ</a>
+      <div class="clock" id="clock">00:00:00</div>
+      <div class="date" id="date">—</div>
+    </div>
+  </div>
+
+  <!-- left -->
+  <div class="panel">
+    <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+    <div class="label">System Telemetry</div>
+    <div class="readout">
+      <div class="row"><span>NEURAL CORE</span><span id="m-core">—</span></div>
+      <div class="bar"><i id="b-core" style="width:0%"></i></div>
+      <div class="row"><span>CONTEXT LOAD</span><span id="m-ctx">0%</span></div>
+      <div class="bar"><i id="b-ctx" style="width:0%"></i></div>
+      <div class="row"><span>RESPONSE LATENCY</span><span id="m-lat">— ms</span></div>
+      <div class="bar"><i id="b-lat" style="width:0%"></i></div>
+      <div class="row"><span>VOICE ENGINE</span><span id="m-voice" class="ok">READY</span></div>
+      <div class="bar"><i style="width:100%"></i></div>
+      <div class="row"><span>UPLINK</span><span class="ok">LOCALHOST · PRIVATE</span></div>
+    </div>
+    <div class="label" style="border-top:1px solid rgba(63,208,255,.14)">Pendientes · Obsidian</div>
+    <div class="readout" id="tasks-readout">
+      <div class="row"><span>ESCANEANDO…</span><span>—</span></div>
+    </div>
+    <div class="row" id="tasks-toggle" style="cursor:pointer;user-select:none;display:none;color:var(--cyan)">
+      <span id="tasks-toggle-label">▸ VER Y CERRAR</span><span></span>
+    </div>
+    <div id="tasks-filters" style="display:none;font-size:.82em;opacity:.85;margin-top:4px">
+      <label style="cursor:pointer;margin-right:12px"><input type="checkbox" id="f-dated"> solo con fecha</label>
+      <label style="cursor:pointer"><input type="checkbox" id="f-nomeet"> ocultar reuniones</label>
+    </div>
+    <div id="tasks-list" style="display:none;max-height:46vh;overflow-y:auto;margin-top:6px;padding-right:4px"></div>
+  </div>
+
+  <!-- center reactor -->
+  <div class="center">
+    <canvas id="reactor"></canvas>
+    <div class="status-ring" id="state">EN LÍNEA</div>
+  </div>
+
+  <!-- right -->
+  <div class="panel">
+    <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+    <div class="label">Global Status</div>
+    <canvas id="globe"></canvas>
+    <div class="stat-big" id="msgcount">0<small>INTERACCIONES</small></div>
+  </div>
+
+  <!-- conversation -->
+  <div class="panel conv">
+    <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
+    <div class="label">Communication Channel</div>
+    <div class="log" id="log"></div>
+    <div class="inrow">
+      <input id="inp" placeholder="Habla o escribe a Jarvis…" autocomplete="off" />
+      <button class="btn" id="mic" title="Hablar">🎙</button>
+      <button class="btn" id="spk" title="Voz de Jarvis (activada)">🔊</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = location.origin;          // mismo origen que el servidor
+let MODEL = "qwen3.5:27b";
+let speakOn = true;
+let history = [{role:"system", content:
+  "Eres J.A.R.V.I.S, el asistente personal de tu jefe. Respondes en español, con tono sereno, "+
+  "elegante y un punto british — como el Jarvis de Iron Man. Eres conciso y directo: 1 a 3 frases salvo "+
+  "que te pidan detalle. Llamas al usuario 'señor' o 'jefe' ocasionalmente. Nunca inventas datos."}];
+let msgCount = 0;
+
+/* ---------- BOOT SEQUENCE ---------- */
+const bootSteps = [
+  "› Inicializando núcleo neuronal local…",
+  "› Conectando con motor de inferencia (Ollama)…",
+  "› Verificando modelos disponibles…",
+  "› Cargando módulo de voz (síntesis + reconocimiento)…",
+  "› Estableciendo canal privado — sin nube, sin fugas…",
+  "› Calibrando interfaz holográfica…",
+  "› Todos los sistemas en línea.",
+];
+async function boot(){
+  const box = document.getElementById('bootlines');
+  // intenta leer el modelo real
+  try{
+    const r = await fetch(API+"/v1/models"); const j = await r.json();
+    if(j.data && j.data.length){ MODEL = (j.data.find(m=>/27b|14b|8b/.test(m.id))||j.data[0]).id; }
+  }catch(e){}
+  for(const s of bootSteps){
+    const d = document.createElement('div');
+    d.innerHTML = s.replace("disponibles…","disponibles… <span class='ok'>["+MODEL+"]</span>");
+    box.appendChild(d); box.scrollTop = box.scrollHeight;
+    await new Promise(r=>setTimeout(r, 280));
+  }
+  document.getElementById('m-core').textContent = MODEL;
+  await new Promise(r=>setTimeout(r, 350));
+  document.getElementById('boot').classList.add('hidden');
+  document.getElementById('ui').classList.remove('hidden');
+  greet();
+}
+
+/* ---------- CLOCK ---------- */
+function tick(){
+  const n = new Date();
+  document.getElementById('clock').textContent = n.toLocaleTimeString('es-MX',{hour12:false});
+  document.getElementById('date').textContent =
+    n.toLocaleDateString('es-MX',{weekday:'long',day:'2-digit',month:'long',year:'numeric'}).toUpperCase();
+}
+setInterval(tick,1000); tick();
+
+/* ---------- LIVE TELEMETRY (visual) ---------- */
+function jitter(id,bar,base,spread,suffix=""){
+  const v = Math.max(2,Math.min(99, base + (Math.random()-.5)*spread));
+  if(bar) document.getElementById(bar).style.width = v.toFixed(0)+"%";
+  if(id) document.getElementById(id).textContent = v.toFixed(0)+(suffix||"%");
+  return v;
+}
+setInterval(()=>{
+  jitter(null,'b-core', thinking?78:22, 14);
+  jitter('m-ctx','b-ctx', Math.min(95, history.length*6), 6);
+}, 1400);
+
+/* ---------- ARC REACTOR (canvas) ---------- */
+const rc = document.getElementById('reactor'), rx = rc.getContext('2d');
+let thinking=false, speaking=false, t=0;
+function sizeCanvas(c){ const r=c.getBoundingClientRect(); c.width=r.width*devicePixelRatio; c.height=r.height*devicePixelRatio; }
+function drawReactor(){
+  sizeCanvas(rc);
+  const w=rc.width, h=rc.height, cx=w/2, cy=h/2, R=Math.min(w,h)*0.34;
+  rx.clearRect(0,0,w,h);
+  const energy = thinking?1:(speaking?0.75:0.35);
+  const cyan = '63,208,255';
+  // outer rotating ticks
+  for(let ring=0; ring<3; ring++){
+    const rr = R*(1+ring*0.22), n=60-ring*12, dir=ring%2?-1:1, sp=(0.2+ring*0.15)*dir;
+    rx.save(); rx.translate(cx,cy); rx.rotate(t*sp);
+    for(let i=0;i<n;i++){
+      const a=(i/n)*Math.PI*2, len=(i%5===0)?14:7;
+      rx.beginPath();
+      rx.moveTo(Math.cos(a)*rr, Math.sin(a)*rr);
+      rx.lineTo(Math.cos(a)*(rr+len), Math.sin(a)*(rr+len));
+      rx.strokeStyle='rgba('+cyan+','+(0.25+0.35*energy)+')'; rx.lineWidth=2; rx.stroke();
+    }
+    rx.restore();
+  }
+  // dashed mid circles
+  for(let k=0;k<2;k++){
+    rx.beginPath(); rx.setLineDash([6,10]);
+    rx.arc(cx,cy,R*(0.78-k*0.18),0,Math.PI*2);
+    rx.strokeStyle='rgba('+cyan+',.4)'; rx.lineWidth=1.5; rx.stroke(); rx.setLineDash([]);
+  }
+  // core glow
+  const g=rx.createRadialGradient(cx,cy,0,cx,cy,R*0.7);
+  const pulse=0.6+0.4*Math.sin(t*4)*energy;
+  g.addColorStop(0,'rgba(180,245,255,'+(0.55*pulse+0.25)+')');
+  g.addColorStop(0.4,'rgba('+cyan+','+(0.4*energy+0.15)+')');
+  g.addColorStop(1,'rgba('+cyan+',0)');
+  rx.fillStyle=g; rx.beginPath(); rx.arc(cx,cy,R*0.7,0,Math.PI*2); rx.fill();
+  // core
+  rx.beginPath(); rx.arc(cx,cy,R*0.16,0,Math.PI*2);
+  rx.fillStyle='rgba(220,250,255,'+(0.8*pulse)+')';
+  rx.shadowColor='rgba('+cyan+',1)'; rx.shadowBlur=40*pulse; rx.fill(); rx.shadowBlur=0;
+  // triangle (reactor look)
+  rx.save(); rx.translate(cx,cy); rx.rotate(-t*0.4);
+  rx.beginPath();
+  for(let i=0;i<3;i++){ const a=i/3*Math.PI*2 - Math.PI/2; const p=R*0.32;
+    i?rx.lineTo(Math.cos(a)*p,Math.sin(a)*p):rx.moveTo(Math.cos(a)*p,Math.sin(a)*p);}
+  rx.closePath(); rx.strokeStyle='rgba(200,248,255,.85)'; rx.lineWidth=2; rx.stroke(); rx.restore();
+  t+=0.016; requestAnimationFrame(drawReactor);
+}
+drawReactor();
+
+/* ---------- WIREFRAME GLOBE (canvas) ---------- */
+const gc=document.getElementById('globe'), gx=gc.getContext('2d'); let gt=0;
+function drawGlobe(){
+  sizeCanvas(gc);
+  const w=gc.width,h=gc.height,cx=w/2,cy=h/2,R=Math.min(w,h)*0.4;
+  gx.clearRect(0,0,w,h);
+  gx.strokeStyle='rgba(63,208,255,.5)'; gx.lineWidth=1;
+  // latitudes
+  for(let i=-4;i<=4;i++){
+    const y=cy+(i/5)*R, rr=Math.sqrt(Math.max(0,R*R-(y-cy)*(y-cy)));
+    gx.beginPath(); gx.ellipse(cx,y,rr,rr*0.32,0,0,Math.PI*2);
+    gx.globalAlpha=0.5-Math.abs(i)*0.07; gx.stroke();
+  }
+  gx.globalAlpha=1;
+  // longitudes (rotating)
+  for(let i=0;i<7;i++){
+    const ph=gt+i/7*Math.PI, rw=Math.abs(Math.cos(ph))*R;
+    gx.beginPath(); gx.ellipse(cx,cy,rw,R,0,0,Math.PI*2);
+    gx.globalAlpha=0.18+0.3*Math.abs(Math.cos(ph)); gx.stroke();
+  }
+  gx.globalAlpha=1;
+  gx.beginPath(); gx.arc(cx,cy,R,0,Math.PI*2);
+  gx.strokeStyle='rgba(120,230,255,.8)'; gx.lineWidth=1.5; gx.stroke();
+  gt+=0.01; requestAnimationFrame(drawGlobe);
+}
+drawGlobe();
+
+/* ---------- LOG ---------- */
+function addLine(who, text){
+  const log=document.getElementById('log');
+  const d=document.createElement('div'); d.className='line';
+  d.innerHTML = '<span class="tag '+(who==='you'?'you':'jv')+'">'+(who==='you'?'TÚ':'JARVIS')+'</span>'+
+                '<span class="'+(who==='you'?'you':'jv')+'">'+escapeHtml(text)+'</span>';
+  log.appendChild(d); log.scrollTop=log.scrollHeight;
+  return d.querySelector('span:last-child');
+}
+function escapeHtml(s){return s.replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+
+/* ---------- VOICE OUT (TTS) ---------- */
+let esVoice=null;
+function pickVoice(){
+  const vs=speechSynthesis.getVoices();
+  esVoice = vs.find(v=>/es-MX|es_MX/.test(v.lang)) || vs.find(v=>/^es/.test(v.lang)) || vs.find(v=>/Mónica|Paulina|Jorge|Diego/i.test(v.name)) || null;
+}
+speechSynthesis.onvoiceschanged=pickVoice; pickVoice();
+function speak(text){
+  if(!speakOn || !text) return;
+  speechSynthesis.cancel();
+  const u=new SpeechSynthesisUtterance(text.replace(/[*_`#]/g,''));
+  u.lang='es-MX'; if(esVoice) u.voice=esVoice; u.rate=1.03; u.pitch=0.95;
+  u.onstart=()=>{speaking=true; setState('HABLANDO');};
+  u.onend=()=>{speaking=false; setState('EN LÍNEA');};
+  speechSynthesis.speak(u);
+}
+
+/* ---------- VOICE IN (STT) ---------- */
+let rec=null, listening=false;
+const SR = window.SpeechRecognition||window.webkitSpeechRecognition;
+if(SR){
+  rec=new SR(); rec.lang='es-MX'; rec.interimResults=false; rec.maxAlternatives=1;
+  rec.onresult=e=>{ const txt=e.results[0][0].transcript; document.getElementById('inp').value=txt; send(txt); };
+  rec.onend=()=>{ listening=false; document.getElementById('mic').classList.remove('live'); };
+  rec.onerror=()=>{ listening=false; document.getElementById('mic').classList.remove('live'); };
+}
+document.getElementById('mic').onclick=()=>{
+  if(!SR){ addLine('jv','El reconocimiento de voz no está disponible en este navegador. Usa Chrome para hablar, señor.'); return; }
+  if(listening){ rec.stop(); return; }
+  speechSynthesis.cancel();
+  listening=true; document.getElementById('mic').classList.add('live'); setState('ESCUCHANDO'); rec.start();
+};
+document.getElementById('spk').onclick=function(){
+  speakOn=!speakOn; this.classList.toggle('mute',!speakOn);
+  this.textContent = speakOn?'🔊':'🔇';
+  if(!speakOn) speechSynthesis.cancel();
+};
+
+function setState(s){ document.getElementById('state').textContent=s; }
+
+/* ---------- PENDIENTES (Obsidian) ---------- */
+let lastTasks=null, allTasks=null, tasksOpen=false, _truncated=false;
+const expanded=new Set();   // claves de grupos abiertos: P|proj, S|proj|sprint, N|path
+let _groupIdx={};           // clave de grupo -> índices globales en allTasks
+let fOnlyDated=false, fHideMeetings=false;   // filtros del panel
+function todayStr(){ const d=new Date();
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+
+async function loadTasks(){
+  try{
+    const r=await fetch(API+'/tasks'); lastTasks=await r.json();
+    const box=document.getElementById('tasks-readout');
+    let html='';
+    html+='<div class="row"><span>TOTAL ABIERTAS</span><span>'+lastTasks.total_open+'</span></div>';
+    if(lastTasks.overdue && lastTasks.overdue.length)
+      html+='<div class="row"><span style="color:var(--amber)">VENCIDAS</span><span style="color:var(--amber)">'+lastTasks.overdue.length+'</span></div>';
+    if(lastTasks.due_today && lastTasks.due_today.length)
+      html+='<div class="row"><span style="color:var(--cyan)">HOY</span><span style="color:var(--cyan)">'+lastTasks.due_today.length+'</span></div>';
+    box.innerHTML=html;
+    const tg=document.getElementById('tasks-toggle');
+    tg.style.display='flex';
+    const fbar=document.getElementById('tasks-filters');
+    const showPanel=(on)=>{ document.getElementById('tasks-list').style.display=on?'block':'none';
+      fbar.style.display=on?'block':'none';
+      document.getElementById('tasks-toggle-label').textContent=(on?'▾ OCULTAR':'▸ VER Y CERRAR'); };
+    tg.onclick=()=>{ tasksOpen=!tasksOpen; showPanel(tasksOpen); if(tasksOpen) loadAllTasks(); };
+    const fd=document.getElementById('f-dated'), fn=document.getElementById('f-nomeet');
+    fd.checked=fOnlyDated; fn.checked=fHideMeetings;
+    fd.onchange=()=>{ fOnlyDated=fd.checked; renderTaskList(); };
+    fn.onchange=()=>{ fHideMeetings=fn.checked; renderTaskList(); };
+    if(tasksOpen){ showPanel(true); loadAllTasks(); }
+  }catch(e){ document.getElementById('tasks-readout').innerHTML='<div class="row"><span>sin datos</span><span>—</span></div>'; }
+}
+
+async function loadAllTasks(){
+  const box=document.getElementById('tasks-list');
+  try{
+    const r=await fetch(API+'/tasks/all'); const j=await r.json();
+    allTasks=j.tasks||[]; _truncated=!!j.truncated;
+    renderTaskList();
+  }catch(e){ box.innerHTML='<div class="row"><span>no se pudo cargar</span><span></span></div>'; }
+}
+
+// Deriva proyecto (cliente) y sprint desde la ruta del archivo en el vault
+function deriveMeta(x){
+  const parts=(x.path||'').split('/').filter(Boolean);
+  let project=x.project||'(otros)', sprint=null;
+  const ci=parts.indexOf('Clientes');
+  if(ci>=0 && parts[ci+1]) project=parts[ci+1];
+  else { const di=parts.indexOf('Documents'); if(di>=0 && parts[di+1]) project=parts[di+1]; }
+  const si=parts.findIndex(p=>/^09_sprints$/i.test(p));
+  if(si>=0 && parts[si+1]) sprint=parts[si+1].replace(/_/g,' ');
+  else { const sp=parts.find(p=>/^sprint[ _]?\d+/i.test(p)); if(sp) sprint=sp.replace(/_/g,' '); }
+  return {project, sprint};
+}
+function taskRowHtml(x, gi){
+  const t=todayStr();
+  const col = (x.due && x.due<t) ? 'var(--amber)' : (x.due===t ? 'var(--cyan)' : 'var(--txt)');
+  return '<div class="trow" data-i="'+gi+'" style="display:flex;gap:8px;align-items:flex-start;padding:5px 0 5px 16px;border-bottom:1px solid rgba(63,208,255,.06)">'
+    +'<button class="tdone" title="Cerrar" style="flex:0 0 auto;background:none;border:1px solid rgba(63,208,255,.35);color:var(--cyan);border-radius:4px;cursor:pointer;line-height:1;padding:2px 7px">✓</button>'
+    +'<span style="flex:1;min-width:0;font-size:.92em"><span style="color:'+col+'">'+escapeHtml(x.text)+'</span>'
+    +(x.due?'<br><span style="opacity:.5;font-size:.85em">📅 '+escapeHtml(x.due)+'</span>':'')+'</span></div>';
+}
+// Encabezado de grupo (colapsable + botón de cierre por bloque)
+function hdr(key,label,count,color,weight,indent){
+  const k=encodeURIComponent(key);
+  return '<div class="ghdr" data-k="'+k+'" style="display:flex;align-items:center;gap:6px;margin-top:6px;padding:3px 0 3px '+indent+'px;border-bottom:1px solid rgba(63,208,255,.14)">'
+    +'<span class="glabel" style="cursor:pointer;flex:1;min-width:0;color:'+color+';font-weight:'+weight+';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+label+'</span>'
+    +'<span style="opacity:.55;font-size:.85em">'+count+'</span>'
+    +'<button class="tbulk" data-k="'+k+'" title="Cerrar todas ('+count+')" style="flex:0 0 auto;background:none;border:1px solid rgba(63,208,255,.35);color:var(--cyan);border-radius:4px;cursor:pointer;line-height:1;padding:2px 6px;font-size:.85em">✓</button>'
+    +'</div>';
+}
+function isMeeting(x){ return (x.path||'').split('/').some(p=>/reuniones/i.test(p)); }
+function renderTaskList(){
+  const box=document.getElementById('tasks-list');
+  const items=(allTasks||[]).filter(x=>(!fOnlyDated||x.due)&&(!fHideMeetings||!isMeeting(x)));
+  if(!items.length){ box.innerHTML='<div class="row"><span>'+((allTasks&&allTasks.length)?'nada con esos filtros':'nada por cerrar 🎉')+'</span><span></span></div>'; return; }
+  _groupIdx={};
+  // agrupa: proyecto -> sprint('' = sin sprint) -> nota(path) -> [índices globales]
+  const projs={};
+  items.forEach((x,gi)=>{ const m=deriveMeta(x);
+    const P=projs[m.project]||(projs[m.project]={n:0,idx:[],sprints:{}});
+    const sk=m.sprint||'';
+    const S=P.sprints[sk]||(P.sprints[sk]={idx:[],notes:{}});
+    const np=x.path||x.file||'';
+    const N=S.notes[np]||(S.notes[np]={label:(x.file||(np.split('/').pop()||'nota')),idx:[]});
+    N.idx.push(gi); S.idx.push(gi); P.idx.push(gi); P.n++;
+  });
+  let html='';
+  Object.keys(projs).sort((a,b)=>projs[b].n-projs[a].n).forEach(pn=>{
+    const P=projs[pn]; const pk='P|'+pn; _groupIdx[pk]=P.idx.map(i=>items[i]);
+    const pOpen=expanded.has(pk);
+    html+=hdr(pk,(pOpen?'▾ ':'▸ ')+escapeHtml(pn.toUpperCase()),P.n,'var(--cyan)',600,0);
+    if(!pOpen) return;
+    const sks=Object.keys(P.sprints).sort((a,b)=>(a===''?1:0)-(b===''?1:0)||a.localeCompare(b));
+    sks.forEach(sk=>{
+      const S=P.sprints[sk]; let notesShown=true;
+      if(sk){ const skk='S|'+pn+'|'+sk; _groupIdx[skk]=S.idx.map(i=>items[i]); const sOpen=expanded.has(skk);
+        html+=hdr(skk,(sOpen?'▾ ':'▸ ')+'▪ '+escapeHtml(sk),S.idx.length,'var(--txt)',500,12);
+        notesShown=sOpen;
+      }
+      if(!notesShown) return;
+      Object.keys(S.notes).sort((a,b)=>S.notes[b].idx.length-S.notes[a].idx.length).forEach(np=>{
+        const N=S.notes[np]; const nk='N|'+np; _groupIdx[nk]=N.idx.map(i=>items[i]); const nOpen=expanded.has(nk);
+        html+=hdr(nk,(nOpen?'▾ ':'▸ ')+'📄 '+escapeHtml(N.label),N.idx.length,'var(--txt)',400,sk?24:12);
+        if(nOpen){
+          N.idx.slice().sort((ia,ib)=>{ const a=items[ia].due||'~~', b=items[ib].due||'~~'; return a<b?-1:(a>b?1:0); })
+            .forEach(gi=>{ html+=taskRowHtml(items[gi], gi); });
+        }
+      });
+    });
+  });
+  if(_truncated) html+='<div class="row" style="opacity:.5;margin-top:6px"><span>(lista truncada)</span><span></span></div>';
+  box.innerHTML=html;
+  box.querySelectorAll('.ghdr').forEach(h=>{
+    h.querySelector('.glabel').onclick=()=>{ const k=decodeURIComponent(h.getAttribute('data-k'));
+      if(expanded.has(k)) expanded.delete(k); else expanded.add(k); renderTaskList(); };
+    const b=h.querySelector('.tbulk');
+    if(b) b.onclick=(ev)=>{ ev.stopPropagation(); bulkClose(decodeURIComponent(b.getAttribute('data-k'))); };
+  });
+  box.querySelectorAll('.trow').forEach(row=>{
+    const x=items[+row.getAttribute('data-i')];
+    row.querySelector('.tdone').onclick=(ev)=>{ ev.stopPropagation(); closeTask(x,row); };
+  });
+}
+async function bulkClose(key){
+  const arr=_groupIdx[key]||[]; if(!arr.length) return;
+  if(!confirm('¿Cerrar '+arr.length+' pendiente(s)? Se marcarán como hechos ([x]) en tus notas de Obsidian.')) return;
+  if(arr.length>50 && !confirm('⚠️ Son '+arr.length+' pendientes — bastantes. ¿Confirmas el cierre masivo? Marca [x] en muchas notas y no se deshace fácil.')) return;
+  const items=arr.map(x=>({path:x.path,line:x.line,text:x.text}));
+  try{
+    const r=await fetch(API+'/tasks/close_bulk',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({items})});
+    const j=await r.json();
+    if(j.failed && j.failed.length) console.warn('No se cerraron '+j.failed.length+':', j.failed);
+    await loadAllTasks(); loadTasks();
+  }catch(e){ alert('Error al cerrar en bloque: '+e); }
+}
+async function closeTask(x,row){
+  const btn=row.querySelector('.tdone'); btn.disabled=true; btn.textContent='…';
+  try{
+    const r=await fetch(API+'/tasks/close',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({path:x.path,line:x.line,text:x.text})});
+    const j=await r.json();
+    if(j.ok){
+      row.style.transition='opacity .3s'; row.style.opacity='0';
+      setTimeout(()=>{ loadAllTasks(); loadTasks(); },320);  // re-agrupa y refresca conteos
+    } else {
+      btn.textContent='↻'; btn.disabled=false; btn.title=j.error||'la nota cambió';
+      setTimeout(loadAllTasks,400);
+    }
+  }catch(e){ btn.textContent='✗'; btn.disabled=false; btn.title=String(e); }
+}
+
+// ¿la pregunta es sobre tareas/pendientes?
+function isTaskQuery(t){
+  return /pendient|tarea|to-?do|tareas|qu[eé] (tengo|hay|falta|debo|hacer)|checklist|hacer hoy|por hacer/i.test(t);
+}
+// detecta proyecto mencionado
+function projectIn(t){
+  if(!lastTasks) return null;
+  for(const p of (lastTasks.projects||[])){ if(new RegExp('\\b'+p.name+'\\b','i').test(t)) return p.name; }
+  return null;
+}
+async function taskContext(text){
+  const proj=projectIn(text);
+  try{
+    if(proj){
+      const r=await fetch(API+'/tasks?project='+encodeURIComponent(proj));
+      const d=await r.json();
+      const lines=d.tasks.map(x=>'- '+x.text+(x.due?(' (📅 '+x.due+')'):'')).join('\n');
+      return 'DATOS REALES de las notas Obsidian del usuario — pendientes ABIERTOS del proyecto '+d.project+
+             ' ('+d.open+' en total, mostrando hasta '+d.tasks.length+'):\n'+lines;
+    }
+    if(!lastTasks) await loadTasks();
+    const d=lastTasks;
+    let s='DATOS REALES de las notas Obsidian del usuario (hoy '+d.today+'):\n';
+    s+='Total pendientes abiertos: '+d.total_open+'\n';
+    s+='Por proyecto: '+d.projects.map(p=>p.name+'='+p.open).join(', ')+'\n';
+    if(d.overdue.length) s+='VENCIDAS ('+d.overdue.length+'): '+d.overdue.map(t=>t.text+' ['+t.project+', '+t.due+']').join(' · ')+'\n';
+    s+='Pendientes de notas editadas recientemente:\n'+d.recent.map(t=>'- ['+t.project+'] '+t.text).join('\n');
+    return s;
+  }catch(e){ return null; }
+}
+
+/* ---------- BRIEFING al arrancar ---------- */
+async function briefing(){
+  await loadTasks();
+  if(!lastTasks) return;
+  const d=lastTasks;
+  const porProj=d.projects.map(p=>p.open+' en '+p.name).join(', ');
+  let msg='Resumen del día, señor. Tiene '+d.total_open+' pendientes abiertos: '+porProj+'.';
+  if(d.due_today.length) msg+=' '+d.due_today.length+' vencen hoy.';
+  if(d.overdue.length) msg+=' Atención: '+d.overdue.length+' están vencidas.';
+  msg+=' Pregúnteme por cualquier proyecto para ver el detalle.';
+  addLine('jv',msg); speak(msg);
+}
+
+/* ---------- CHAT ---------- */
+async function send(text){
+  text=(text||document.getElementById('inp').value).trim(); if(!text) return;
+  document.getElementById('inp').value='';
+  addLine('you',text);
+  // si pregunta por pendientes, inyecta datos reales (no alucinar)
+  let injected=null;
+  if(isTaskQuery(text)){ injected=await taskContext(text); }
+  if(injected){ history.push({role:'system',content:injected}); }
+  // contexto de proyecto/cliente (MOC + notas recientes con fecha) — evita citar notas viejas
+  try{
+    const r=await fetch(API+'/context?q='+encodeURIComponent(text));
+    const ec=(await r.json()).context;
+    if(ec){ history.push({role:'system',content:ec}); }
+  }catch(e){}
+  // agenda del Calendario de Mac si pregunta por eventos/citas
+  if(/agenda|calendario|evento|reuni|junta|cita|qu[eé] tengo (hoy|ma[ñn]ana|esta semana|el|este)|agendad|disponib/i.test(text)){
+    try{
+      const r=await fetch(API+'/calendar?days=14');
+      const cc=(await r.json()).context;
+      if(cc){ history.push({role:'system',content:cc}); }
+    }catch(e){}
+  }
+  history.push({role:'user',content:text});
+  msgCount++; document.getElementById('msgcount').firstChild.textContent=msgCount;
+  thinking=true; setState('PROCESANDO');
+  const target=addLine('jv','…');
+  const t0=performance.now();
+  try{
+    const r=await fetch(API+'/v1/chat/completions',{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({model:MODEL, messages:history, stream:false})
+    });
+    const j=await r.json();
+    let reply=(j.choices&&j.choices[0]&&j.choices[0].message&&j.choices[0].message.content)||'(sin respuesta)';
+    reply=reply.replace(/<think>[\s\S]*?<\/think>/g,'').trim();   // limpia razonamiento
+    target.textContent=reply;
+    history.push({role:'assistant',content:reply});
+    const lat=performance.now()-t0;
+    document.getElementById('m-lat').textContent=(lat/1000).toFixed(1)+' s';
+    document.getElementById('b-lat').style.width=Math.min(100,lat/60)+'%';
+    speak(reply);
+  }catch(e){
+    target.textContent='No puedo contactar el núcleo local. ¿Está corriendo «jarvis serve» y Ollama?';
+  }
+  thinking=false; setState(speaking?'HABLANDO':'EN LÍNEA');
+}
+document.getElementById('inp').addEventListener('keydown',e=>{ if(e.key==='Enter') send(); });
+
+async function greet(){
+  document.getElementById('inp').focus();
+  await loadTasks();
+  let g='Sistemas en línea. Buenas, señor. J.A.R.V.I.S a su disposición, de forma local y privada.';
+  if(lastTasks && lastTasks.total_open){
+    const porProj=lastTasks.projects.map(p=>p.open+' en '+p.name).join(', ');
+    g+=' Tiene '+lastTasks.total_open+' pendientes: '+porProj+'.';
+    if(lastTasks.overdue.length) g+=' '+lastTasks.overdue.length+' vencidas.';
+    g+=' Pregúnteme por un proyecto para el detalle.';
+  } else { g+=' ¿En qué puedo ayudarle?'; }
+  addLine('jv',g); speak(g);
+}
+
+window.addEventListener('resize',()=>{});
+boot();
+</script>
+</body>
+</html>

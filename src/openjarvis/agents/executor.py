@@ -63,7 +63,7 @@ class AgentExecutor:
         if self._system is None:
             return
         name = getattr(getattr(tool, "spec", None), "name", "")
-        if name == "llm":
+        if name in ("llm", "council"):
             if hasattr(tool, "_engine"):
                 tool._engine = self._system.engine
             if hasattr(tool, "_model"):

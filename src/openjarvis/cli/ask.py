@@ -78,7 +78,7 @@ def _build_tools(tool_names: list[str], config, engine, model_name: str):
         if name == "retrieval":
             backend = _get_memory_backend(config)
             tools.append(tool_cls(backend=backend))
-        elif name == "llm":
+        elif name in ("llm", "council"):
             tools.append(tool_cls(engine=engine, model=model_name))
         elif name == "file_read":
             tools.append(tool_cls())

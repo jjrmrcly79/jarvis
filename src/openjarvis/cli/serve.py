@@ -186,7 +186,9 @@ def serve(
                     from openjarvis.tools._stubs import BaseTool
 
                     _DEFAULT_TOOLS = {"think", "calculator", "web_search"}
-                    configured = config.agent.tools
+                    # Canonical location is [tools] enabled; fall back to the
+                    # deprecated [agent] tools for backward compatibility.
+                    configured = config.tools.enabled or config.agent.tools
                     if configured:
                         if isinstance(configured, list):
                             allowed = {
@@ -212,6 +214,13 @@ def serve(
                             tools.append(tool_cls())
                         elif isinstance(tool_cls, BaseTool):
                             tools.append(tool_cls)
+                    # Inject runtime deps into tools that need them (llm,
+                    # council) — they're instantiated no-arg above.
+                    for _t in tools:
+                        if hasattr(_t, "_engine") and getattr(_t, "_engine") is None:
+                            _t._engine = engine
+                        if hasattr(_t, "_model") and not getattr(_t, "_model"):
+                            _t._model = model_name
                     if tools:
                         agent_kwargs["tools"] = tools
 

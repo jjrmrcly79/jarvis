@@ -278,6 +278,10 @@ class JarvisSystem:
                     from openjarvis.tools.llm_tool import LLMTool
 
                     tools.append(LLMTool(self.engine, model=self.model))
+                elif name == "council":
+                    from openjarvis.tools.council import CouncilTool
+
+                    tools.append(CouncilTool(self.engine, model=self.model))
                 elif ToolRegistry.contains(name):
                     tools.append(ToolRegistry.create(name))
             except Exception as exc:
@@ -950,7 +954,7 @@ class SystemBuilder:
     def _inject_tool_deps(tool, engine, model, memory_backend, channel_backend):
         """Inject runtime dependencies into tools that need them."""
         name = tool.spec.name
-        if name == "llm":
+        if name in ("llm", "council"):
             if hasattr(tool, "_engine"):
                 tool._engine = engine
             if hasattr(tool, "_model"):
