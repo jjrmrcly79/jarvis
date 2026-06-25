@@ -36,6 +36,29 @@
     grid-template-rows: 56px 1fr 210px;
     gap:14px; padding:16px; z-index:10;
   }
+  /* ---- Pantallas ANCHAS / ultrawide (p.ej. Samsung Odyssey 49", 32:9) ----
+     En vez de estirar el centro a 5120px, se vuelve un "cockpit" centrado y
+     legible, con los costados rellenos para que no se vea vacío. */
+  @media (min-aspect-ratio: 19/9){
+    .grid{
+      width:min(100%, 2600px); left:50%; right:auto; transform:translateX(-50%);
+      grid-template-columns: 380px 1fr 380px; gap:18px; padding:22px;
+    }
+    .conv .log .line{max-width:1400px}     /* el chat no se vuelve una línea kilométrica */
+    /* confina scanlines + viñeta al cockpit -> las bandas laterales quedan en negro limpio */
+    body::before, body::after{ left:50%; right:auto; transform:translateX(-50%); width:min(100%, 2600px); }
+    body{ background:
+      radial-gradient(1100px 820px at 50% 46%, rgba(40,120,180,.18), transparent 70%),
+      var(--bg); }
+  }
+  @media (min-aspect-ratio: 3/1){           /* súper-ultrawide 32:9: un poco más de ancho útil */
+    .grid{ width:min(100%, 2980px); grid-template-columns: 430px 1fr 430px; }
+    body::before, body::after{ width:min(100%, 2980px); }
+  }
+  /* ---- Pantalla del Mac (16:10) o ventana angosta ---- */
+  @media (max-width: 1280px){
+    .grid{ grid-template-columns: 240px 1fr 240px; gap:10px; padding:12px; }
+  }
   .panel{
     border:1px solid rgba(63,208,255,.22);
     background:linear-gradient(180deg, rgba(10,30,50,.30), rgba(5,15,28,.18));
@@ -70,9 +93,41 @@
   .row span:last-child{color:#eafaff}
   .bar{height:6px; border-radius:3px; background:rgba(63,208,255,.12); overflow:hidden; margin:3px 0 9px}
   .bar i{display:block; height:100%; background:linear-gradient(90deg,var(--cyan-dim),var(--cyan)); box-shadow:0 0 10px var(--glow)}
-  #globe{width:100%; height:240px}
   .stat-big{font-size:34px; color:#eafaff; text-align:center; text-shadow:0 0 16px var(--glow); padding:6px}
   .stat-big small{display:block; font-size:9px; letter-spacing:3px; opacity:.6}
+  /* ---- dashboard (centro de mando) ---- */
+  #dash{scrollbar-width:thin; scrollbar-color:rgba(63,208,255,.4) transparent}
+  #dash::-webkit-scrollbar{width:6px}
+  #dash::-webkit-scrollbar-thumb{background:rgba(63,208,255,.35); border-radius:3px}
+  .label.dash-sep{border-top:1px solid rgba(63,208,255,.14); margin-top:4px}
+  .dash-c{float:right; color:#eafaff; opacity:.85; letter-spacing:1px}
+  .readout.dash{padding:6px 12px 8px; line-height:1.5}
+  .drow{display:flex; gap:7px; align-items:baseline; padding:3px 0; border-bottom:1px solid rgba(63,208,255,.06)}
+  .drow:last-child{border-bottom:0}
+  .drow .tag{flex:0 0 auto; font-size:8.5px; letter-spacing:1px; padding:1px 5px; border-radius:5px;
+    background:rgba(63,208,255,.12); color:var(--cyan); text-shadow:0 0 8px var(--glow)}
+  .drow .tag.hoy{background:rgba(255,181,71,.16); color:var(--amber)}
+  .drow .dt{flex:1 1 auto; color:#cfeeff; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .drow .dsub{color:#7fc4e6; opacity:.8}
+  .drow .dwhen{flex:0 0 auto; font-size:9px; color:#7fc4e6; opacity:.75}
+  .drow.unread .dt{color:#eafaff; font-weight:600}
+  .drow.unread::before{content:'●'; color:var(--amber); font-size:8px; flex:0 0 auto; text-shadow:0 0 8px var(--amber)}
+  .dempty{opacity:.45; font-style:italic; padding:3px 0}
+  /* listas abatibles (recordatorios por lista) */
+  .dgroup{display:flex; justify-content:space-between; align-items:center; cursor:pointer;
+    padding:4px 0; color:var(--cyan); user-select:none; border-bottom:1px solid rgba(63,208,255,.07)}
+  .dgroup:hover{color:#eafaff}
+  .dgroup .dgh{letter-spacing:.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .dgroup .dgc{flex:0 0 auto; font-size:9px; opacity:.8; background:rgba(63,208,255,.14);
+    border-radius:7px; padding:0 7px; margin-left:6px}
+  .drow.ditem{padding:2px 0 2px 14px; border-bottom:0}
+  .drow.ditem .dt{color:#bfe6ff}
+  /* botón ocultar remitente (correos) */
+  .mailrow .hidebtn{flex:0 0 auto; background:none; border:0; cursor:pointer; padding:0 2px;
+    font-size:10px; line-height:1; opacity:0; transition:opacity .15s; filter:grayscale(1) brightness(1.4)}
+  .mailrow:hover .hidebtn{opacity:.55}
+  .mailrow .hidebtn:hover{opacity:1; filter:none}
+  #mail-unblock{color:var(--cyan); text-decoration:none; border-bottom:1px dotted}
 
   /* bottom: conversation */
   .conv{grid-column:1 / 4; display:flex; flex-direction:column; padding:10px 14px 12px}
@@ -141,6 +196,8 @@
       <div class="row"><span>VOICE ENGINE</span><span id="m-voice" class="ok">READY</span></div>
       <div class="bar"><i style="width:100%"></i></div>
       <div class="row"><span>UPLINK</span><span class="ok">LOCALHOST · PRIVATE</span></div>
+      <div class="row"><span>DISPLAY</span><span id="m-display">—</span></div>
+      <div class="row"><span>INTERACCIONES</span><span id="msgcount-num">0</span></div>
     </div>
     <div class="label" style="border-top:1px solid rgba(63,208,255,.14)">Pendientes · Obsidian</div>
     <div class="readout" id="tasks-readout">
@@ -162,12 +219,15 @@
     <div class="status-ring" id="state">EN LÍNEA</div>
   </div>
 
-  <!-- right -->
-  <div class="panel">
+  <!-- right: centro de mando -->
+  <div class="panel" id="dash" style="display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden">
     <div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
-    <div class="label">Global Status</div>
-    <canvas id="globe"></canvas>
-    <div class="stat-big" id="msgcount">0<small>INTERACCIONES</small></div>
+    <div class="label">📅 Agenda <span class="dash-c" id="agenda-c"></span></div>
+    <div class="readout dash" id="agenda-readout"><div class="drow"><span class="dt">cargando…</span></div></div>
+    <div class="label dash-sep">⏰ Recordatorios <span class="dash-c" id="rem-c"></span></div>
+    <div class="readout dash" id="rem-readout"><div class="drow"><span class="dt">cargando…</span></div></div>
+    <div class="label dash-sep">✉️ Correos <span class="dash-c" id="mail-c"></span></div>
+    <div class="readout dash" id="mail-readout"><div class="drow"><span class="dt">cargando…</span></div></div>
   </div>
 
   <!-- conversation -->
@@ -246,13 +306,21 @@ setInterval(()=>{
 
 /* ---------- ARC REACTOR (canvas) ---------- */
 const rc = document.getElementById('reactor'), rx = rc.getContext('2d');
-let thinking=false, speaking=false, t=0;
+let thinking=false, speaking=false, t=0, voiceLvl=0;
 function sizeCanvas(c){ const r=c.getBoundingClientRect(); c.width=r.width*devicePixelRatio; c.height=r.height*devicePixelRatio; }
+// amplitud simulada de "habla" (mezcla de senos -> ritmo orgánico, no calcado)
+function speechAmp(){
+  return Math.min(1, Math.abs(0.5*Math.sin(t*11)+0.3*Math.sin(t*17.3+1)+0.2*Math.sin(t*23.7+2))
+                     * (0.55+0.45*Math.sin(t*2.3)) + 0.08);
+}
 function drawReactor(){
   sizeCanvas(rc);
   const w=rc.width, h=rc.height, cx=w/2, cy=h/2, R=Math.min(w,h)*0.34;
   rx.clearRect(0,0,w,h);
-  const energy = thinking?1:(speaking?0.75:0.35);
+  // nivel de voz suavizado: sube al hablar, decae en silencio
+  const target = speaking ? speechAmp() : 0;
+  voiceLvl += (target - voiceLvl) * 0.28;
+  const energy = thinking?1:(speaking?(0.55+0.45*voiceLvl):0.35);
   const cyan = '63,208,255';
   // outer rotating ticks
   for(let ring=0; ring<3; ring++){
@@ -273,9 +341,27 @@ function drawReactor(){
     rx.arc(cx,cy,R*(0.78-k*0.18),0,Math.PI*2);
     rx.strokeStyle='rgba('+cyan+',.4)'; rx.lineWidth=1.5; rx.stroke(); rx.setLineDash([]);
   }
+  // anillo ecualizador reactivo a la voz (barras que rebotan al hablar)
+  if(voiceLvl>0.02){
+    const bars=72, base=R*0.52;
+    rx.save(); rx.translate(cx,cy); rx.rotate(t*0.15);
+    for(let i=0;i<bars;i++){
+      const a=(i/bars)*Math.PI*2;
+      // altura por barra: nivel global * patrón por-barra -> parece forma de onda
+      const amp=voiceLvl*(0.5+0.5*Math.abs(Math.sin(i*0.7+t*6)+0.6*Math.sin(i*1.9-t*4)));
+      const len=R*0.06 + R*0.30*amp;
+      const x0=Math.cos(a)*base, y0=Math.sin(a)*base;
+      rx.beginPath();
+      rx.moveTo(x0,y0);
+      rx.lineTo(Math.cos(a)*(base+len), Math.sin(a)*(base+len));
+      rx.strokeStyle='rgba(150,240,255,'+(0.30+0.55*amp)+')';
+      rx.lineWidth=2.4; rx.lineCap='round'; rx.stroke();
+    }
+    rx.restore();
+  }
   // core glow
   const g=rx.createRadialGradient(cx,cy,0,cx,cy,R*0.7);
-  const pulse=0.6+0.4*Math.sin(t*4)*energy;
+  const pulse=0.6+0.4*Math.sin(t*4)*energy + 0.5*voiceLvl;
   g.addColorStop(0,'rgba(180,245,255,'+(0.55*pulse+0.25)+')');
   g.addColorStop(0.4,'rgba('+cyan+','+(0.4*energy+0.15)+')');
   g.addColorStop(1,'rgba('+cyan+',0)');
@@ -290,36 +376,31 @@ function drawReactor(){
   for(let i=0;i<3;i++){ const a=i/3*Math.PI*2 - Math.PI/2; const p=R*0.32;
     i?rx.lineTo(Math.cos(a)*p,Math.sin(a)*p):rx.moveTo(Math.cos(a)*p,Math.sin(a)*p);}
   rx.closePath(); rx.strokeStyle='rgba(200,248,255,.85)'; rx.lineWidth=2; rx.stroke(); rx.restore();
-  t+=0.016; requestAnimationFrame(drawReactor);
+  // avanza más rápido al hablar/pensar -> sensación de actividad
+  t += 0.016 * (thinking?1.7:(speaking?(1.3+voiceLvl*0.9):1)); requestAnimationFrame(drawReactor);
 }
 drawReactor();
 
-/* ---------- WIREFRAME GLOBE (canvas) ---------- */
-const gc=document.getElementById('globe'), gx=gc.getContext('2d'); let gt=0;
-function drawGlobe(){
-  sizeCanvas(gc);
-  const w=gc.width,h=gc.height,cx=w/2,cy=h/2,R=Math.min(w,h)*0.4;
-  gx.clearRect(0,0,w,h);
-  gx.strokeStyle='rgba(63,208,255,.5)'; gx.lineWidth=1;
-  // latitudes
-  for(let i=-4;i<=4;i++){
-    const y=cy+(i/5)*R, rr=Math.sqrt(Math.max(0,R*R-(y-cy)*(y-cy)));
-    gx.beginPath(); gx.ellipse(cx,y,rr,rr*0.32,0,0,Math.PI*2);
-    gx.globalAlpha=0.5-Math.abs(i)*0.07; gx.stroke();
+/* ---------- DETECCIÓN DE PANTALLA (Mac vs monitor externo / ultrawide) ---------- */
+function detectDisplay(){
+  const vw=window.innerWidth, vh=window.innerHeight, ar=vw/vh;
+  const sw=screen.width, sh=screen.height, sar=sw/sh;
+  let kind, name;
+  if(sar>=3 || ar>=3){ kind='ultrawide'; name='ULTRAWIDE 49″ (32:9)'; }
+  else if(sar>=2.1 || ar>=2.1){ kind='wide'; name='ULTRAWIDE (21:9)'; }
+  else if(sw>=2400){ kind='ext'; name='MONITOR EXTERNO'; }
+  else { kind='mac'; name='MAC · BUILT-IN'; }
+  document.body.dataset.display=kind;
+  const m=document.getElementById('m-display');
+  if(m){
+    const full = (Math.abs(vw-sw)<4 && Math.abs(vh-sh)<60);  // ~pantalla completa
+    m.textContent = name+' · '+sw+'×'+sh + (full?'':' · ventana '+vw+'×'+vh);
   }
-  gx.globalAlpha=1;
-  // longitudes (rotating)
-  for(let i=0;i<7;i++){
-    const ph=gt+i/7*Math.PI, rw=Math.abs(Math.cos(ph))*R;
-    gx.beginPath(); gx.ellipse(cx,cy,rw,R,0,0,Math.PI*2);
-    gx.globalAlpha=0.18+0.3*Math.abs(Math.cos(ph)); gx.stroke();
-  }
-  gx.globalAlpha=1;
-  gx.beginPath(); gx.arc(cx,cy,R,0,Math.PI*2);
-  gx.strokeStyle='rgba(120,230,255,.8)'; gx.lineWidth=1.5; gx.stroke();
-  gt+=0.01; requestAnimationFrame(drawGlobe);
 }
-drawGlobe();
+detectDisplay();
+window.addEventListener('resize', detectDisplay);
+document.addEventListener('fullscreenchange', detectDisplay);
+if(window.matchMedia) window.matchMedia('(min-aspect-ratio: 19/9)').addEventListener?.('change', detectDisplay);
 
 /* ---------- LOG ---------- */
 function addLine(who, text){
@@ -460,6 +541,122 @@ async function loadTasks(){
     if(tasksOpen){ showPanel(true); loadAllTasks(); }
   }catch(e){ document.getElementById('tasks-readout').innerHTML='<div class="row"><span>sin datos</span><span>—</span></div>'; }
 }
+
+/* ---------- DASHBOARD (agenda · recordatorios · correos) ---------- */
+function trunc(s,n){ s=s||''; return s.length>n ? s.slice(0,n-1)+'…' : s; }
+function shortTime(when){            // "Friday, 26 June 2026 at 12:00:00 p.m." -> "12:00 p.m."
+  if(!when) return '';
+  const i=when.indexOf(' at ');
+  let s = i>=0 ? when.slice(i+4) : when;
+  return s.replace(/:00\s*(?=[ap]\.?\s?m)/i,' ').replace(/\s+/g,' ').trim();
+}
+function dashEmpty(box,msg){ box.innerHTML='<div class="dempty">'+msg+'</div>'; }
+
+async function loadAgenda(){
+  const box=document.getElementById('agenda-readout');
+  try{
+    const j=await (await fetch(API+'/agenda')).json();
+    const items=j.items||[];
+    document.getElementById('agenda-c').textContent=items.length||'';
+    if(!items.length){ dashEmpty(box,'sin eventos próximos'); return; }
+    box.innerHTML=items.map(ev=>{
+      const tag = ev.days===0?'HOY':(ev.days===1?'MAÑ':('+'+ev.days+'d'));
+      const cls = ev.days===0?'tag hoy':'tag';
+      return '<div class="drow"><span class="'+cls+'">'+tag+'</span>'+
+             '<span class="dt">'+escapeHtml(trunc(ev.title,26))+'</span>'+
+             '<span class="dwhen">'+escapeHtml(shortTime(ev.when))+'</span></div>';
+    }).join('');
+  }catch(e){ dashEmpty(box,'sin acceso a Calendario'); }
+}
+
+let _remData=null;
+const remOpen=new Set();           // listas expandidas (por nombre)
+function renderReminders(){
+  const box=document.getElementById('rem-readout');
+  if(!_remData || !_remData.length){ dashEmpty(box,'sin recordatorios'); return; }
+  const groups={}, order=[];
+  _remData.forEach(r=>{ if(!groups[r.list]){ groups[r.list]=[]; order.push(r.list); } groups[r.list].push(r); });
+  let html='';
+  order.forEach((lname,gi)=>{
+    const items=groups[lname], open=remOpen.has(lname);
+    html+='<div class="dgroup" data-gi="'+gi+'"><span class="dgh">'+(open?'▾':'▸')+' '+
+          escapeHtml(trunc(lname,22))+'</span><span class="dgc">'+items.length+'</span></div>';
+    if(open) html+=items.map(r=>'<div class="drow ditem"><span class="dt">'+escapeHtml(trunc(r.name,28))+'</span>'+
+          (r.due?'<span class="dwhen">'+escapeHtml(trunc(r.due,12))+'</span>':'')+'</div>').join('');
+  });
+  box.innerHTML=html;
+  box.querySelectorAll('.dgroup').forEach(el=>el.onclick=()=>{
+    const l=order[+el.dataset.gi]; remOpen.has(l)?remOpen.delete(l):remOpen.add(l); renderReminders();
+  });
+}
+async function loadReminders(){
+  try{
+    const j=await (await fetch(API+'/reminders')).json();
+    _remData=j.items||[];
+    document.getElementById('rem-c').textContent=_remData.length||'';
+    renderReminders();
+  }catch(e){ dashEmpty(document.getElementById('rem-readout'),'sin acceso a Recordatorios'); }
+}
+
+let _mailData=null, _mailMeta={};
+const mailOpen=new Set(['iCloud']);     // cuentas expandidas (iCloud abierta por defecto)
+function renderMail(){
+  const box=document.getElementById('mail-readout');
+  const items=_mailData||[];
+  const totalUnread=items.filter(m=>m.unread).length;
+  document.getElementById('mail-c').textContent = totalUnread? totalUnread+' sin leer' : (items.length+' rec.');
+  if(!items.length){ dashEmpty(box,'sin correos relevantes'); return; }
+  // agrupar por cuenta preservando el orden (iCloud, Juanjosé, Villa)
+  const groups={}, order=[];
+  items.forEach((m,i)=>{ if(!groups[m.account]){ groups[m.account]=[]; order.push(m.account); } groups[m.account].push({m,i}); });
+  let html='';
+  order.forEach((acct,gi)=>{
+    const arr=groups[acct], open=mailOpen.has(acct), un=arr.filter(x=>x.m.unread).length;
+    html+='<div class="dgroup" data-acct="'+gi+'"><span class="dgh">'+(open?'▾':'▸')+' '+escapeHtml(acct)+
+          '</span><span class="dgc">'+(un? un+' ●':arr.length)+'</span></div>';
+    if(open) html+=arr.map(({m,i})=>
+      '<div class="drow ditem mailrow'+(m.unread?' unread':'')+'">'+
+      '<span class="dt">'+escapeHtml(trunc(m.sender,14))+' · '+escapeHtml(trunc(m.subject,24))+'</span>'+
+      '<span class="dwhen">'+escapeHtml(m.when)+'</span>'+
+      '<button class="hidebtn" data-i="'+i+'" title="Ocultar correos de '+escapeHtml(m.sender)+'">🚫</button></div>'
+    ).join('');
+  });
+  const promo=_mailMeta.hidden||0, blk=_mailMeta.blocked||0;
+  if(promo||blk) html+='<div class="dempty">+'+(promo+blk)+' ocultos'+
+    (blk? ' · '+blk+' bloqueados <a href="#" id="mail-unblock">ver</a>':'')+'</div>';
+  box.innerHTML=html;
+  box.querySelectorAll('.dgroup').forEach(el=>el.onclick=()=>{
+    const a=order[+el.dataset.acct]; mailOpen.has(a)?mailOpen.delete(a):mailOpen.add(a); renderMail();
+  });
+  box.querySelectorAll('.hidebtn').forEach(b=>b.onclick=async(e)=>{
+    e.stopPropagation();
+    const s=items[+b.dataset.i].sender;
+    b.textContent='⏳';
+    await fetch(API+'/mail/hide',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sender:s})}).catch(()=>{});
+    loadMail();
+  });
+  const un=document.getElementById('mail-unblock');
+  if(un) un.onclick=(e)=>{ e.preventDefault(); manageBlocked(); };
+}
+async function manageBlocked(){
+  const names=_mailMeta.blockedList||[];
+  if(!names.length){ alert('No hay remitentes bloqueados.'); return; }
+  const who=prompt('Remitentes bloqueados — escribe uno tal cual para DESBLOQUEARLO:\n\n'+names.join('\n'));
+  if(who && who.trim()){
+    await fetch(API+'/mail/unhide',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sender:who.trim()})}).catch(()=>{});
+    loadMail();
+  }
+}
+async function loadMail(){
+  try{
+    const j=await (await fetch(API+'/mail')).json();
+    _mailData=j.items||[];
+    _mailMeta={unread:j.unread,hidden:j.hidden,blocked:j.blocked,accounts:j.accounts,blockedList:j.blockedList||[]};
+    renderMail();
+  }catch(e){ dashEmpty(document.getElementById('mail-readout'),'sin acceso a Mail'); }
+}
+
+function loadDashboard(){ loadAgenda(); loadReminders(); loadMail(); }
 
 async function loadAllTasks(){
   const box=document.getElementById('tasks-list');
@@ -649,7 +846,7 @@ async function send(text){
     }catch(e){}
   }
   history.push({role:'user',content:text});
-  msgCount++; document.getElementById('msgcount').firstChild.textContent=msgCount;
+  msgCount++; document.getElementById('msgcount-num').textContent=msgCount;
   thinking=true; setState('PROCESANDO');
   const target=addLine('jv','…');
   const t0=performance.now();
@@ -676,6 +873,8 @@ document.getElementById('inp').addEventListener('keydown',e=>{ if(e.key==='Enter
 
 async function greet(){
   document.getElementById('inp').focus();
+  loadDashboard();                       // agenda · recordatorios · correos (en paralelo)
+  setInterval(loadDashboard, 180000);    // refresca cada 3 min
   await loadTasks();
   let g='Sistemas en línea. Buenas, señor. J.A.R.V.I.S a su disposición, de forma local y privada.';
   if(lastTasks && lastTasks.total_open){

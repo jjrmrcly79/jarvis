@@ -681,6 +681,159 @@ def reminders_context(limit: int = 60):
             f"({len(rows)} en total, agrupados por lista):\n" + "\n".join(lines))
 
 
+# ---------- Versiones estructuradas (JSON) para el dashboard del HUD ----------
+# Reutilizan las mismas consultas que las funciones *_context (que devuelven texto
+# para el chat); estas devuelven listas de dicts para pintarlas como UI.
+
+def agenda_rows(days: int = 7, limit: int = 12):
+    import subprocess
+    try:
+        r = subprocess.run(["osascript", "-e", _CAL_SCRIPT, str(days)],
+                           capture_output=True, text=True, timeout=40)
+    except Exception:
+        return []
+    out = []
+    for ln in r.stdout.splitlines():
+        parts = ln.split("\t")
+        if len(parts) >= 4:
+            try:
+                dd = int(parts[0])
+            except ValueError:
+                dd = 999
+            out.append({"days": dd, "when": parts[1], "cal": parts[2], "title": parts[3]})
+    out.sort(key=lambda x: x["days"])
+    return out[:limit]
+
+
+def reminders_rows(limit: int = 20):
+    import subprocess
+    try:
+        r = subprocess.run(["osascript", "-e", _REM_READ_SCRIPT],
+                           capture_output=True, text=True, timeout=60)
+    except Exception:
+        return []
+    out = []
+    for ln in r.stdout.splitlines():
+        parts = ln.split("\t")
+        if len(parts) >= 2:
+            due = parts[2] if len(parts) >= 3 else ""
+            if due and " at " in due:
+                due = due.split(" at ")[0]
+            out.append({"list": parts[0], "name": parts[1], "due": due})
+    return out[:limit]
+
+
+# Fuentes de correo a mostrar. Se leen de un archivo LOCAL fuera del repo
+# (~/.openjarvis/mail_accounts.json) para no exponer correos/cuentas en el código.
+# Formato: {"sources":[{"label","url_like","owner"}]} — ver mail_accounts.example.json.
+# iCloud guarda su recibido en INBOX; Gmail lo guarda en [Gmail]/Todos (All Mail),
+# de donde se excluye lo que envió el propio dueño (owner).
+MAIL_ACCOUNTS_FILE = Path.home() / ".openjarvis" / "mail_accounts.json"
+
+
+def _mail_sources():
+    try:
+        data = json.loads(MAIL_ACCOUNTS_FILE.read_text(encoding="utf-8"))
+        return [(s["label"], s["url_like"], s.get("owner"))
+                for s in data.get("sources", []) if s.get("label") and s.get("url_like")]
+    except Exception:
+        return []
+
+
+# Remitentes ocultados a mano por el usuario (botón 🚫 del panel). Persistente.
+HIDDEN_SENDERS_FILE = Path.home() / ".openjarvis" / "mail_hidden_senders.txt"
+
+
+def load_hidden_senders():
+    try:
+        return {l.strip() for l in HIDDEN_SENDERS_FILE.read_text(encoding="utf-8").splitlines() if l.strip()}
+    except Exception:
+        return set()
+
+
+def add_hidden_sender(sender):
+    s = (sender or "").strip()
+    if not s or s in load_hidden_senders():
+        return
+    HIDDEN_SENDERS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(HIDDEN_SENDERS_FILE, "a", encoding="utf-8") as f:
+        f.write(s + "\n")
+
+
+def remove_hidden_sender(sender):
+    s = (sender or "").strip()
+    cur = load_hidden_senders()
+    if s in cur:
+        cur.discard(s)
+        HIDDEN_SENDERS_FILE.write_text(("\n".join(sorted(cur)) + "\n") if cur else "", encoding="utf-8")
+
+
+def mail_rows(limit: int = 8, include_promo: bool = False):
+    """Correos recientes de las 3 cuentas (iCloud INBOX + 2 Gmail desde All Mail,
+    excluyendo lo enviado). Por defecto OCULTA promociones/newsletters y los
+    remitentes que el usuario bloqueó. Devuelve (items, ocultos_promo, bloqueados)."""
+    import sqlite3
+    from datetime import datetime
+    try:
+        from openjarvis.tools.mail_read import _find_envelope_index
+        db = _find_envelope_index()
+    except Exception:
+        db = None
+    if db is None:
+        return [], 0, 0
+    blocklist = load_hidden_senders()
+    out = []
+    hidden = 0   # promociones filtradas por metadatos
+    blocked = 0  # remitentes ocultados a mano por el usuario
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro&immutable=1", uri=True, timeout=5.0)
+    except Exception:
+        return [], 0, 0
+    try:
+        for label, url_like, owner in _mail_sources():
+            sql = (
+                "SELECT m.read, m.date_received, m.subject_prefix, s.subject, "
+                "COALESCE(NULLIF(a.comment, ''), a.address), "
+                "m.unsubscribe_type, m.brand_indicator, m.list_id_hash, a.address "
+                "FROM messages m "
+                "LEFT JOIN addresses a ON a.ROWID = m.sender "
+                "LEFT JOIN subjects s ON s.ROWID = m.subject "
+                "LEFT JOIN mailboxes mb ON mb.ROWID = m.mailbox "
+                "WHERE m.deleted = 0 AND mb.url LIKE ? "
+                + ("AND (a.address IS NULL OR a.address <> ?) " if owner else "")
+                + "ORDER BY m.date_received DESC LIMIT ?"
+            )
+            params = [url_like] + ([owner] if owner else []) + [max(limit * 10, 100)]
+            try:
+                rows = conn.execute(sql, params).fetchall()
+            except Exception:
+                rows = []
+            kept = 0
+            for read_flag, epoch, prefix, subject, sender, unsub, brand, lst, addr in rows:
+                snd = (sender or "(desconocido)").strip()
+                if snd in blocklist:
+                    blocked += 1
+                    continue
+                # promo/newsletter: trae "darse de baja", o remitente de marca, o List-Id
+                is_promo = (unsub not in (None, 0)) or (brand is not None) or (lst not in (None, 0))
+                if is_promo and not include_promo:
+                    hidden += 1
+                    continue
+                try:
+                    cuando = datetime.fromtimestamp(int(epoch)).strftime("%d-%b %H:%M")
+                except (TypeError, ValueError, OSError):
+                    cuando = "?"
+                subj = ((prefix or "") + (subject or "")).strip() or "(sin asunto)"
+                out.append({"unread": not read_flag, "sender": snd,
+                            "subject": subj, "when": cuando, "account": label})
+                kept += 1
+                if kept >= limit:
+                    break
+    finally:
+        conn.close()
+    return out, hidden, blocked
+
+
 _REM_CREATE_SCRIPT = '''on run argv
   set listName to item 1 of argv
   set remName to item 2 of argv
@@ -1130,6 +1283,45 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _serve_agenda(self):
+        try:
+            self._send_json({"items": agenda_rows()})
+        except Exception as e:
+            self._send_json({"items": [], "error": str(e)}, 500)
+
+    def _serve_reminders(self):
+        try:
+            self._send_json({"items": reminders_rows()})
+        except Exception as e:
+            self._send_json({"items": [], "error": str(e)}, 500)
+
+    def _serve_mail(self):
+        try:
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            promo = qs.get("promo", ["0"])[0] in ("1", "true", "yes")
+            items, hidden, blocked = mail_rows(include_promo=promo)
+            unread = sum(1 for x in items if x.get("unread"))
+            accounts = sorted({x.get("account") for x in items if x.get("account")})
+            self._send_json({"items": items, "unread": unread, "hidden": hidden,
+                             "blocked": blocked, "accounts": accounts,
+                             "blockedList": sorted(load_hidden_senders())})
+        except Exception as e:
+            self._send_json({"items": [], "unread": 0, "hidden": 0,
+                             "blocked": 0, "error": str(e)}, 500)
+
+    def _mail_hide_post(self, unhide=False):
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            data = json.loads(self.rfile.read(length) or b"{}") if length else {}
+            sender = (data.get("sender") or "").strip()
+            if not sender:
+                self._send_json({"ok": False, "error": "falta sender"}, 400)
+                return
+            (remove_hidden_sender if unhide else add_hidden_sender)(sender)
+            self._send_json({"ok": True, "blocked": sorted(load_hidden_senders())})
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)}, 500)
+
     def _serve_voice_data(self):
         try:
             self._send_json(voice_buckets())
@@ -1186,6 +1378,12 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_voice_page()
         elif self.path.startswith("/voice/data"):
             self._serve_voice_data()
+        elif self.path.startswith("/agenda"):
+            self._serve_agenda()
+        elif self.path.startswith("/reminders"):
+            self._serve_reminders()
+        elif self.path.startswith("/mail"):
+            self._serve_mail()
         elif self.path.startswith("/tts"):
             self._serve_tts()
         elif self._is_proxy():
@@ -1200,6 +1398,10 @@ class Handler(BaseHTTPRequestHandler):
             self._tasks_close_post()
         elif self.path.startswith("/voice/archive"):
             self._voice_archive_post()
+        elif self.path.startswith("/mail/unhide"):
+            self._mail_hide_post(unhide=True)
+        elif self.path.startswith("/mail/hide"):
+            self._mail_hide_post()
         elif self.path.startswith("/tts"):
             self._serve_tts()
         elif self._is_proxy():

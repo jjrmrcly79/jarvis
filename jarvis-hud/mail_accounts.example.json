@@ -1,0 +1,7 @@
+{
+  "_comment": "Copiar a ~/.openjarvis/mail_accounts.json y poner tus cuentas. NO se versiona.",
+  "sources": [
+    {"label": "iCloud", "url_like": "imap://<UUID-CUENTA>/INBOX", "owner": null},
+    {"label": "MiGmail", "url_like": "imap://<UUID-CUENTA>/%/Todos", "owner": "tucorreo@gmail.com"}
+  ]
+}
