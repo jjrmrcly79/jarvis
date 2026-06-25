@@ -17,6 +17,45 @@ CORE = os.environ.get("JARVIS_CORE", "http://127.0.0.1:8000")
 HUD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
 PROXY_PREFIXES = ("/v1", "/health", "/dashboard", "/agents", "/models")
 
+# ---------- TTS (Piper · voz neuronal local, $0, offline) ----------
+import io, wave, threading
+TTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tts")
+TTS_MODEL = os.environ.get(
+    "JARVIS_TTS_MODEL", os.path.join(TTS_DIR, "es_AR-daniela-high.onnx"))
+# length_scale > 1 = más pausada/elegante; ajustable sin tocar código
+TTS_LENGTH_SCALE = float(os.environ.get("JARVIS_TTS_SPEED", "1.06"))
+_tts_voice = None
+_tts_lock = threading.Lock()  # la sesión onnxruntime no es segura en concurrencia
+
+
+def _get_tts_voice():
+    global _tts_voice
+    if _tts_voice is None:
+        from piper import PiperVoice
+        _tts_voice = PiperVoice.load(TTS_MODEL)
+    return _tts_voice
+
+
+# "J.A.R.V.I.S" se deletrea por los puntos -> decirlo como palabra "Jarvis"
+_JARVIS_RE = re.compile(r"\bJ\.?A\.?R\.?V\.?I\.?S\b", re.I)
+
+
+def _tts_normalize(text):
+    """Normaliza el texto solo para la voz (no afecta lo que se muestra en pantalla)."""
+    return _JARVIS_RE.sub("Jarvis", text or "")
+
+
+def synth_wav_bytes(text):
+    """Sintetiza `text` a WAV (bytes) con la voz Piper. Carga el modelo una vez."""
+    from piper.config import SynthesisConfig
+    voice = _get_tts_voice()
+    cfg = SynthesisConfig(length_scale=TTS_LENGTH_SCALE)
+    buf = io.BytesIO()
+    with _tts_lock:
+        with wave.open(buf, "wb") as wf:
+            voice.synthesize_wav(_tts_normalize(text), wf, cfg)
+    return buf.getvalue()
+
 VAULT = Path(os.environ.get(
     "VAULT",
     "/Users/juangarces/Library/Mobile Documents/iCloud~md~obsidian/Documents",
@@ -974,6 +1013,39 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(msg)
 
+    def _serve_tts(self):
+        """Devuelve WAV con la voz de Jarvis. Acepta POST {text} o GET ?text=."""
+        try:
+            text = ""
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            if length:
+                raw = self.rfile.read(length)
+                try:
+                    text = (json.loads(raw) or {}).get("text", "")
+                except Exception:
+                    text = ""
+            if not text:
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                text = qs.get("text", [""])[0]
+            text = (text or "").strip()
+            if not text:
+                self.send_error(400, "falta texto")
+                return
+            audio = synth_wav_bytes(text)
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Content-Length", str(len(audio)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(audio)
+        except Exception as e:
+            msg = json.dumps({"error": str(e)}).encode()
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(msg)))
+            self.end_headers()
+            self.wfile.write(msg)
+
     def _serve_tasks(self):
         try:
             parsed = urllib.parse.urlparse(self.path)
@@ -1114,6 +1186,8 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_voice_page()
         elif self.path.startswith("/voice/data"):
             self._serve_voice_data()
+        elif self.path.startswith("/tts"):
+            self._serve_tts()
         elif self._is_proxy():
             self._proxy("GET")
         else:
@@ -1126,6 +1200,8 @@ class Handler(BaseHTTPRequestHandler):
             self._tasks_close_post()
         elif self.path.startswith("/voice/archive"):
             self._voice_archive_post()
+        elif self.path.startswith("/tts"):
+            self._serve_tts()
         elif self._is_proxy():
             self._proxy("POST")
         else:

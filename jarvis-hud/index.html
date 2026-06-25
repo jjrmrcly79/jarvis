@@ -339,10 +339,65 @@ function pickVoice(){
   esVoice = vs.find(v=>/es-MX|es_MX/.test(v.lang)) || vs.find(v=>/^es/.test(v.lang)) || vs.find(v=>/Mónica|Paulina|Jorge|Diego/i.test(v.name)) || null;
 }
 speechSynthesis.onvoiceschanged=pickVoice; pickVoice();
-function speak(text){
-  if(!speakOn || !text) return;
+let _ttsSeq=0;          // descarta respuestas TTS viejas si llega una nueva
+let _ttsUrl=null;       // objectURL en curso (para liberar)
+
+/* Un único elemento <audio> reutilizable. Clave: el navegador bloquea play()
+   fuera del gesto del usuario, y como hay un `await fetch` antes de reproducir,
+   se pierde el gesto. Solución: "desbloquear" este elemento con el primer
+   gesto (clic/tecla) reproduciendo un wav silencioso; ya desbloqueado, los
+   play() programáticos posteriores funcionan. */
+const jvAudio = new Audio();
+const SILENT_WAV = "data:audio/wav;base64,UklGRqQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";
+let audioPrimed=false;
+let pendingGreeting=null;   // saludo en espera del primer gesto (Safari bloquea audio sin interacción)
+function primeAudio(){
+  if(audioPrimed) return;
+  audioPrimed=true;
+  const done=()=>{ jvAudio.volume=1;
+    if(pendingGreeting){ const g=pendingGreeting; pendingGreeting=null; speak(g); } };
+  try{
+    jvAudio.src=SILENT_WAV; jvAudio.volume=0;
+    const p=jvAudio.play();
+    if(p&&p.then) p.then(()=>{ jvAudio.pause(); jvAudio.currentTime=0; done(); }).catch(done);
+    else done();
+  }catch(_){ done(); }
+}
+['pointerdown','keydown','touchstart','click'].forEach(ev=>
+  window.addEventListener(ev, primeAudio, {capture:true}));
+
+jvAudio.onplay  = ()=>{ speaking=true;  setState('HABLANDO'); };
+jvAudio.onended = ()=>{ speaking=false; setState('EN LÍNEA'); if(_ttsUrl){URL.revokeObjectURL(_ttsUrl); _ttsUrl=null;} };
+
+function stopSpeak(){
+  try{ jvAudio.pause(); }catch(_){}
+  if(_ttsUrl){ URL.revokeObjectURL(_ttsUrl); _ttsUrl=null; }
   speechSynthesis.cancel();
-  const u=new SpeechSynthesisUtterance(text.replace(/[*_`#]/g,''));
+}
+async function speak(text){
+  if(!speakOn || !text) return;
+  const clean = text.replace(/[*_`#]/g,'').trim();
+  if(!clean) return;
+  stopSpeak();
+  const seq = ++_ttsSeq;
+  try{
+    const r = await fetch(API+'/tts', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:clean})});
+    if(!r.ok) throw new Error('tts '+r.status);
+    const blob = await r.blob();
+    if(seq!==_ttsSeq || !speakOn) return;   // llegó otra respuesta o se muteó: descartar
+    const url = URL.createObjectURL(blob); _ttsUrl=url;
+    jvAudio.src=url; jvAudio.volume=1;
+    await jvAudio.play();   // reproduce en el elemento ya desbloqueado
+  }catch(e){
+    console.warn('[tts] voz neuronal falló, uso respaldo:', e);
+    if(seq===_ttsSeq) speakFallback(clean);   // servidor caído o audio bloqueado
+  }
+}
+// Respaldo: Web Speech API del navegador si el servidor TTS no responde
+function speakFallback(text){
+  speechSynthesis.cancel();
+  const u=new SpeechSynthesisUtterance(text);
   u.lang='es-MX'; if(esVoice) u.voice=esVoice; u.rate=1.03; u.pitch=0.95;
   u.onstart=()=>{speaking=true; setState('HABLANDO');};
   u.onend=()=>{speaking=false; setState('EN LÍNEA');};
@@ -361,13 +416,13 @@ if(SR){
 document.getElementById('mic').onclick=()=>{
   if(!SR){ addLine('jv','El reconocimiento de voz no está disponible en este navegador. Usa Chrome para hablar, señor.'); return; }
   if(listening){ rec.stop(); return; }
-  speechSynthesis.cancel();
+  stopSpeak();
   listening=true; document.getElementById('mic').classList.add('live'); setState('ESCUCHANDO'); rec.start();
 };
 document.getElementById('spk').onclick=function(){
   speakOn=!speakOn; this.classList.toggle('mute',!speakOn);
   this.textContent = speakOn?'🔊':'🔇';
-  if(!speakOn) speechSynthesis.cancel();
+  if(!speakOn) stopSpeak();
 };
 
 function setState(s){ document.getElementById('state').textContent=s; }
@@ -629,7 +684,9 @@ async function greet(){
     if(lastTasks.overdue.length) g+=' '+lastTasks.overdue.length+' vencidas.';
     g+=' Pregúnteme por un proyecto para el detalle.';
   } else { g+=' ¿En qué puedo ayudarle?'; }
-  addLine('jv',g); speak(g);
+  addLine('jv',g);
+  // muestra el saludo ya; lo HABLA en el primer gesto (cuando el audio se desbloquea)
+  if(audioPrimed) speak(g); else pendingGreeting=g;
 }
 
 window.addEventListener('resize',()=>{});
