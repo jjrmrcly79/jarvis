@@ -101,6 +101,7 @@ nunca se inventa una confirmación.
 | **Brief proactivo** | lectura | automático 7:00 y 21:00 · `/brief` | `daily_briefs` (tarea de fondo del bot) |
 | **Buscar en historial de correo** | lectura | "¿qué me ha escrito Marco?", "busca correos de CFE" | `serve_hud.mail_search_context` (Envelope Index + cuerpo) |
 | **Buscar en la memoria del vault** | lectura | "¿qué sabes de X?", "¿qué tengo apuntado sobre Y?" | `serve_hud.knowledge_context` (FTS sobre memory.db) |
+| **Onboarding del segundo cerebro** | escritura | `/onboarding` (6 preguntas) | `onboarding.py` → `Personal/Segundo Cerebro/Perfil (Jarvis).md` |
 
 ### 4.1 Pendientes de Obsidian (lectura)
 Escáner determinista de checkboxes `- [ ]` en el vault, por proyecto, con fechas
@@ -242,6 +243,23 @@ Tras editar `serve_hud.py` o `index.html`: `launchctl kickstart -k
 gui/$(id -u)/com.openjarvis.hud` y validar el `<script>` con `node --check`.
 - Si el LLM falla, el brief sale con los datos crudos (nunca se queda callado).
 - `/brief` lo dispara a demanda.
+
+---
+
+### 4.8 Onboarding — el perfil como lente (2026-07-06)
+
+`/onboarding` arranca una entrevista de 6 pasos (metas del trimestre,
+prioridades Nexia/Personal/Villa Catania, personas clave, qué vigilar) con
+botones ⏭ Saltar / ✖️ Cancelar. Las respuestas se escriben LITERALES (sin LLM)
+en `Personal/Segundo Cerebro/Perfil (Jarvis).md`; re-correrlo actualiza el
+perfil y el anterior queda citado en la sección «📜 Historial» (nunca se
+pierde). Al terminar manda el TOUR (guía de todos los comandos).
+
+`onboarding.profile_context()` inyecta el perfil vigente (sin historial) como
+system message en: brief de la mañana, cierre nocturno y «estatus del día» —
+el LLM prioriza pendientes/agenda/correo según las metas que Juan definió.
+`/start` sugiere el onboarding si aún no hay perfil. La respuesta en curso
+tiene prioridad en `handle_text` (estado `ONBOARD`, antes que notas/chat).
 
 ---
 

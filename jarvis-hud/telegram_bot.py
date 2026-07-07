@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import serve_hud   # reutiliza el escáner de pendientes (scan_tasks/project_tasks)
 import voice_notes as vn  # transcripción + clasificación + archivado de notas de voz
 import chat_memory as cm  # log persistente de conversaciones + diario en Obsidian
+import onboarding as ob   # entrevista inicial → Perfil (Jarvis).md en el vault
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
@@ -575,7 +576,14 @@ def _ask_core_inner(chat_id, text):
             "El usuario pide un ESTATUS DEL DÍA. Con los DATOS REALES que siguen "
             "(agenda, recordatorios y pendientes), arma un resumen breve y organizado "
             "en secciones (📅 Agenda · ✅ Pendientes · 🔔 Recordatorios). Usa solo los "
-            "datos provistos; si una sección viene vacía, dilo en una línea."})
+            "datos provistos; si una sección viene vacía, dilo en una línea. Si viene "
+            "un PERFIL, ordena por lo que más acerca a esas metas."})
+        try:
+            prof = ob.profile_context()
+            if prof:
+                msgs.append({"role": "system", "content": prof})
+        except Exception:
+            pass
     if is_task_query(text) or status:
         ctx = task_context(text)
         if ctx:
@@ -662,11 +670,14 @@ async def gate(update: Update) -> bool:
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await gate(update):
         return
+    extra = ("" if ob.profile_exists() else
+             "\n\n🧠 Aún no tengo su perfil: corra /onboarding (6 preguntas) "
+             "para armar el núcleo de su segundo cerebro.")
     await update.message.reply_text(
         "👋 J.A.R.V.I.S a su disposición, señor.\n"
         "Escríbame lo que necesite. Pregúnteme por sus pendientes "
         "(ej. «¿qué tengo en Nexia?») o cualquier cosa de sus notas.\n"
-        "Use /voz para activar o silenciar mis respuestas habladas.")
+        "Use /voz para activar o silenciar mis respuestas habladas." + extra)
 
 
 async def cmd_voz(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -734,6 +745,11 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await gate(update):
         return
     chat_id = update.effective_chat.id
+
+    # ¿entrevista de onboarding en curso? → la respuesta alimenta el perfil
+    if chat_id in ONBOARD:
+        await _ob_advance(chat_id, ctx.bot, update.message.text.strip())
+        return
 
     # ¿estábamos esperando el nombre de la persona para una nota de voz?
     if chat_id in PENDING_NAME:
@@ -869,6 +885,106 @@ async def _edit_or_send(query_or_bot, state, text, markup):
     bot = query_or_bot if not is_query else query_or_bot.get_bot()
     await bot.send_message(state["chat_id"], text, reply_markup=markup,
                            parse_mode="Markdown")
+
+
+# ============================ ONBOARDING =====================================
+ONBOARD = {}   # chat_id -> {"i": paso actual, "data": {clave: respuesta}}
+
+TOUR = (
+    "🧭 *Su segundo cerebro quedó armado, señor. Así se usa:*\n\n"
+    "*Capturar*\n"
+    "· Nota de voz (Telegram o Memos de Apple) → la transcribo y archivo\n"
+    "· «toma nota: …» o /nota → nota de texto al vault\n"
+    "· «recuérdame …» → Recordatorios · «agéndame …» → Calendario\n\n"
+    "*Consultar*\n"
+    "· «¿qué tengo hoy?» / «estatus del día»\n"
+    "· «¿qué sabes de X?» → busco en sus notas\n"
+    "· «¿qué me ha escrito X?» → busco en su correo\n"
+    "· «¿qué tengo en Nexia?» → pendientes por proyecto\n\n"
+    "*Automático*\n"
+    "· ☀️ 7:00 brief de la mañana · 🌙 21:00 cierre + diario en Obsidian\n"
+    "· Todo lo que hablamos queda en su diario (`/diario` lo genera ya)\n"
+    "· /brief a demanda · /dios modo Claude · /voz respuestas habladas\n\n"
+    "Su perfil vive en `Personal/Segundo Cerebro/` y guía mis prioridades. "
+    "Re-corra /onboarding cuando cambien sus metas."
+)
+
+
+def _ob_markup(final=False):
+    if final:
+        return None
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("⏭ Saltar pregunta", callback_data="ob|skip"),
+        InlineKeyboardButton("✖️ Cancelar", callback_data="ob|cancel")]])
+
+
+async def cmd_onboarding(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Arranca (o reinicia) la entrevista del segundo cerebro."""
+    if not await gate(update):
+        return
+    chat_id = update.effective_chat.id
+    ONBOARD[chat_id] = {"i": 0, "data": {}}
+    ya = ("\n_(Ya tiene un perfil — sus respuestas nuevas lo actualizan y el "
+          "anterior queda en el historial.)_" if ob.profile_exists() else "")
+    await update.message.reply_text(
+        "🧠 *Onboarding del segundo cerebro*\n"
+        "Le haré 6 preguntas, señor. Con sus respuestas construyo su perfil en "
+        "Obsidian y lo uso para priorizar briefs, pendientes y correo. "
+        "Conteste con texto libre; puede saltar cualquiera." + ya,
+        parse_mode="Markdown")
+    await update.message.reply_text(ob.STEPS[0]["q"], reply_markup=_ob_markup())
+
+
+async def _ob_advance(chat_id, bot, answer):
+    """Registra la respuesta del paso actual y manda el siguiente (o cierra)."""
+    st = ONBOARD.get(chat_id)
+    if not st:
+        return
+    step = ob.STEPS[st["i"]]
+    if answer is not None:
+        st["data"][step["key"]] = answer
+    st["i"] += 1
+    if st["i"] < len(ob.STEPS):
+        await bot.send_message(chat_id, ob.STEPS[st["i"]]["q"],
+                               reply_markup=_ob_markup())
+        return
+    # terminó: escribir perfil + tour
+    ONBOARD.pop(chat_id, None)
+    res = await asyncio.to_thread(ob.write_profile, st["data"])
+    if not res.get("ok"):
+        await bot.send_message(
+            chat_id, f"⚠️ No pude escribir el perfil: {res.get('error')}")
+        return
+    cm.log_event("accion", chat_id=chat_id,
+                 detalle=f"Onboarding completado → {res['rel']}")
+    contestadas = sum(1 for v in st["data"].values() if (v or "").strip())
+    await bot.send_message(
+        chat_id,
+        f"✅ Perfil guardado ({contestadas}/6 respondidas):\n`{res['rel']}`\n"
+        "Desde ahora priorizo sus briefs y el estatus con ese lente.",
+        parse_mode="Markdown")
+    await bot.send_message(chat_id, TOUR, parse_mode="Markdown")
+
+
+async def on_ob_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    chat_id = update.effective_chat.id
+    verb = q.data.split("|")[1]
+    if chat_id not in ONBOARD:
+        await q.edit_message_reply_markup(None)
+        return
+    if verb == "cancel":
+        ONBOARD.pop(chat_id, None)
+        await q.edit_message_text("Onboarding cancelado, señor. "
+                                  "Retómelo cuando guste con /onboarding.")
+        return
+    if verb == "skip":
+        try:
+            await q.edit_message_reply_markup(None)
+        except Exception:
+            pass
+        await _ob_advance(chat_id, ctx.bot, None)
 
 
 async def capture_note_flow(update, ctx, content):
@@ -1122,7 +1238,14 @@ def morning_brief_text():
              "siguen. Formato: saludo de una línea y secciones 📅 Hoy · "
              "⚠️ Vencidas/urgente · ✅ Pendientes clave · 🔔 Recordatorios · "
              "📧 Correo (solo lo importante). Breve y accionable; enfócate en HOY. "
-             "Usa solo los datos provistos; sección sin datos = una línea."}]
+             "Usa solo los datos provistos; sección sin datos = una línea. Si viene "
+             "un PERFIL, prioriza lo que más acerca a esas metas."}]
+    try:
+        prof = ob.profile_context()
+        if prof:
+            msgs.append({"role": "system", "content": prof})
+    except Exception:
+        pass
     msgs += [{"role": "system", "content": p} for p in parts]
     msgs.append({"role": "user", "content": "Buenos días, dame mi brief del día."})
     return "☀️ " + _brief_llm(msgs, parts)
@@ -1161,7 +1284,14 @@ def evening_brief_text():
              "Redacta el CIERRE DEL DÍA para Juan con los DATOS REALES que siguen. "
              "Formato: 2-3 líneas de balance, luego secciones ⏳ Quedó abierto · "
              "📅 Mañana (agenda y vencimientos). Breve, sereno. Usa solo los datos "
-             "provistos; si no hay nada en una sección, dilo en una línea."}]
+             "provistos; si no hay nada en una sección, dilo en una línea. Si viene "
+             "un PERFIL, señala qué de mañana acerca (o aleja) de esas metas."}]
+    try:
+        prof = ob.profile_context()
+        if prof:
+            msgs.append({"role": "system", "content": prof})
+    except Exception:
+        pass
     msgs += [{"role": "system", "content": p} for p in parts]
     msgs.append({"role": "user", "content": "Dame el cierre del día."})
     txt = "🌙 " + _brief_llm(msgs, parts)
@@ -1305,6 +1435,8 @@ def build_app():
     app.add_handler(CommandHandler("nota", cmd_nota))
     app.add_handler(CommandHandler("brief", cmd_brief))
     app.add_handler(CommandHandler("diario", cmd_diario))
+    app.add_handler(CommandHandler("onboarding", cmd_onboarding))
+    app.add_handler(CallbackQueryHandler(on_ob_button, pattern=r"^ob\|"))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^vn\|"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
