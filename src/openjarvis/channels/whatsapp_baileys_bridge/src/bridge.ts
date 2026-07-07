@@ -86,10 +86,15 @@ async function main(): Promise<void> {
   // Count consecutive closes with no successful open/QR so a persistent
   // failure (e.g. blocked network) surfaces an error instead of looping.
   let failStreak = 0;
+  const MAX_ATTEMPTS = 6;
 
-  function startSocket(): void {
+  function startSocket(attempt: number): void {
+    // Alternate between the fetched WA Web version and Baileys' bundled
+    // default so a version mismatch on either side can't permanently block
+    // pairing.
+    const useFetchedVersion = attempt % 2 === 0;
     sock = makeWASocket({
-      version: waVersion,
+      version: useFetchedVersion ? waVersion : undefined,
       auth: state,
       printQRInTerminal: false,
       logger: silentLogger,
@@ -123,18 +128,21 @@ async function main(): Promise<void> {
         emit({ type: "status", status: "disconnected", code: statusCode, reason });
 
         failStreak += 1;
-        if (failStreak >= 5) {
+        if (failStreak >= MAX_ATTEMPTS) {
           emit({
             type: "error",
             message:
               `WhatsApp closed the connection ${failStreak} times without ` +
-              `pairing (last code ${statusCode ?? "?"}: ${reason}). Check your ` +
-              `network/VPN, then retry.`,
+              `pairing (last code ${statusCode ?? "?"}: ${reason}). This is ` +
+              `almost always the network blocking WhatsApp Web — try another ` +
+              `network (e.g. a phone hotspot), disable any VPN/proxy, then retry.`,
           });
           return;
         }
-        // Reconnect with a small backoff for transient failures.
-        setTimeout(startSocket, 2000);
+        // Reconnect with exponential backoff (2s, 4s, 8s… capped at 30s) so we
+        // don't hammer WhatsApp and risk rate-limiting.
+        const delay = Math.min(2000 * 2 ** (failStreak - 1), 30000);
+        setTimeout(() => startSocket(attempt + 1), delay);
       } else if (connection === "open") {
         failStreak = 0;
         emit({ type: "status", status: "connected" });
@@ -161,7 +169,7 @@ async function main(): Promise<void> {
     });
   }
 
-  startSocket();
+  startSocket(0);
 
   // -----------------------------------------------------------------------
   // Stdin command processing
