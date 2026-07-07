@@ -96,7 +96,6 @@ async function main(): Promise<void> {
     sock = makeWASocket({
       version: useFetchedVersion ? waVersion : undefined,
       auth: state,
-      printQRInTerminal: false,
       logger: silentLogger,
       browser: Browsers.macOS("Desktop"),
     });
