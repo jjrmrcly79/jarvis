@@ -485,8 +485,16 @@ class WhatsAppBaileysChannel(BaseChannel):
                     },
                 )
 
+        elif event_type == "info":
+            message = event.get("message", "")
+            if message:
+                logger.info("Bridge: %s", message)
+                self._progress(message)
+
         elif event_type == "error":
-            logger.error("Bridge error: %s", event.get("message", "unknown"))
+            message = event.get("message", "unknown")
+            logger.error("Bridge error: %s", message)
+            self._progress(f"WhatsApp bridge error: {message}")
             self._status = ChannelStatus.ERROR
 
     def _publish_sent(self, channel: str, content: str, conversation_id: str) -> None:

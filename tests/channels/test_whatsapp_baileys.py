@@ -255,6 +255,30 @@ class TestReaderLoop:
         ch._handle_bridge_event({"type": "error", "message": "something broke"})
         assert ch.status() == ChannelStatus.ERROR
 
+    def test_error_event_forwarded_to_progress(self):
+        ch = WhatsAppBaileysChannel()
+        received = []
+        ch.set_progress_handler(received.append)
+        ch._handle_bridge_event({"type": "error", "message": "network blocked"})
+        assert any("network blocked" in m for m in received)
+
+    def test_info_event_forwarded_to_progress(self):
+        ch = WhatsAppBaileysChannel()
+        received = []
+        ch.set_progress_handler(received.append)
+        ch._handle_bridge_event({"type": "info", "message": "WhatsApp Web version 2.3"})
+        assert received == ["WhatsApp Web version 2.3"]
+        # info must not change status
+        assert ch.status() == ChannelStatus.DISCONNECTED
+
+    def test_status_event_with_extra_fields(self):
+        ch = WhatsAppBaileysChannel()
+        # New bridge adds code/reason to disconnected status events.
+        ch._handle_bridge_event(
+            {"type": "status", "status": "disconnected", "code": 405, "reason": "x"}
+        )
+        assert ch.status() == ChannelStatus.DISCONNECTED
+
     def test_message_event_publishes_to_bus(self):
         bus = EventBus(record_history=True)
         ch = WhatsAppBaileysChannel(bus=bus)
