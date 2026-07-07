@@ -472,3 +472,26 @@ class TestEnsureBridgeReuse:
 
         assert result == bridge_js
         run_npm.assert_not_called()
+
+
+class TestDepsStale:
+    def test_missing_node_modules_is_stale(self, tmp_path):
+        assert WhatsAppBaileysChannel._deps_stale(tmp_path, tmp_path / "node_modules")
+
+    def test_fresh_install_not_stale(self, tmp_path):
+        (tmp_path / "package.json").write_text("{}")
+        node_modules = tmp_path / "node_modules"
+        node_modules.mkdir()  # created after package.json -> newer
+        assert not WhatsAppBaileysChannel._deps_stale(tmp_path, node_modules)
+
+    def test_newer_manifest_is_stale(self, tmp_path):
+        node_modules = tmp_path / "node_modules"
+        node_modules.mkdir()
+        pkg = tmp_path / "package-lock.json"
+        pkg.write_text("{}")
+        # Make the manifest clearly newer than node_modules.
+        import os
+
+        future = node_modules.stat().st_mtime + 100
+        os.utime(pkg, (future, future))
+        assert WhatsAppBaileysChannel._deps_stale(tmp_path, node_modules)

@@ -155,18 +155,19 @@ class WhatsAppBaileysChannel(BaseChannel):
             ):
                 needs_build = True
 
-        # Install dependencies if missing.  When we still need to compile we
-        # need the dev dependencies (typescript), so install the full tree.
+        # Install dependencies when missing, out of date (manifests newer than
+        # the last install, e.g. after a bridge upgrade), or lacking the dev
+        # tools needed to (re)compile the TypeScript.
         node_modules = runtime / "node_modules"
         tsc_bin = node_modules / ".bin" / "tsc"
-        if not node_modules.exists():
+        deps_stale = self._deps_stale(runtime, node_modules)
+        if not node_modules.exists() or deps_stale:
             install_cmd = ["npm", "install"]
-            if not needs_build:
+            if not needs_build and not deps_stale:
                 install_cmd.append("--production")
             logger.info("Running %s in %s", " ".join(install_cmd), runtime)
             self._progress(
-                "Installing WhatsApp bridge dependencies (first run, "
-                "this can take 1-2 min)…"
+                "Installing WhatsApp bridge dependencies (this can take 1-2 min)…"
             )
             self._run_npm(install_cmd, runtime, "npm install", timeout=600.0)
         elif needs_build and not tsc_bin.exists():
@@ -192,6 +193,22 @@ class WhatsAppBaileysChannel(BaseChannel):
                 "Ensure Node.js/npm are installed and the bridge compiled."
             )
         return bridge_js
+
+    @staticmethod
+    def _deps_stale(runtime: Path, node_modules: Path) -> bool:
+        """Return True if a manifest is newer than the installed node_modules.
+
+        Detects dependency changes (e.g. a bumped Baileys version after an
+        upgrade) so ``npm install`` re-runs instead of keeping stale packages.
+        """
+        if not node_modules.exists():
+            return True
+        nm_mtime = node_modules.stat().st_mtime
+        for manifest in ("package.json", "package-lock.json"):
+            path = runtime / manifest
+            if path.exists() and path.stat().st_mtime > nm_mtime:
+                return True
+        return False
 
     def _progress(self, message: str) -> None:
         """Report a setup-progress message to the handler (or the log)."""
