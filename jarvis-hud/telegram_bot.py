@@ -20,10 +20,12 @@ from datetime import datetime, timedelta
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import serve_hud   # reutiliza el escáner de pendientes (scan_tasks/project_tasks)
 import voice_notes as vn  # transcripción + clasificación + archivado de notas de voz
+import chat_memory as cm  # log persistente de conversaciones + diario en Obsidian
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
                           CallbackQueryHandler, ContextTypes, filters)
+from telegram.error import NetworkError, TimedOut
 
 TOKEN = os.environ.get("JARVIS_TG_TOKEN")
 if not TOKEN:
@@ -32,6 +34,32 @@ if not TOKEN:
 CORE = os.environ.get("JARVIS_CORE", "http://127.0.0.1:8000")
 MODEL = os.environ.get("JARVIS_MODEL", "qwen3.5:27b")
 ALLOW_FILE = Path.home() / ".openjarvis" / "telegram_allowed.txt"
+
+# --- Modo dios (Claude API) -------------------------------------------------
+# Híbrido: Ollama por defecto (local, $0); "modo dios" enruta a Claude para
+# tareas pesadas. Se prende/apaga por chat con /dios y /normal.
+GOD_MODEL = os.environ.get("JARVIS_GOD_MODEL", "claude-opus-4-8")
+GOD_MODE = {}            # chat_id -> bool (modo dios activo en ese chat)
+_claude_client = None    # cliente Anthropic perezoso (se crea al primer uso)
+
+
+def _claude_available():
+    """True si hay API key de Anthropic y el SDK está instalado."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return False
+    try:
+        import anthropic  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _get_claude():
+    global _claude_client
+    if _claude_client is None:
+        import anthropic
+        _claude_client = anthropic.Anthropic()  # lee ANTHROPIC_API_KEY del entorno
+    return _claude_client
 
 SYSTEM = ("Eres J.A.R.V.I.S, el asistente personal de tu jefe, por Telegram. "
           "Respondes en español, sereno y elegante, conciso (1-4 frases salvo que "
@@ -146,6 +174,45 @@ def is_mail_query(t):
                           t, re.I))
 
 
+# ─── Búsqueda en el HISTORIAL de correo («¿qué me ha escrito Marco?») ─────────
+_MAILSEARCH_RE = re.compile(
+    r"(?:qu[eé] me han? (?:escrito|mandado|enviado)(?:\s+de(?:sde)?|\s+sobre)?\s+|"
+    r"me (?:escribi[oó]|mand[oó]|envi[oó])\s+(?:algo\s+)?|"
+    r"busca(?:me)?\s+(?:en el\s+)?correos?\s+(?:de|sobre|con)\s+|"
+    r"correos?\s+(?:de|sobre)\s+|alg[uú]n\s+correo\s+de\s+)"
+    r"([\w@.\-áéíóúñü ]{2,40})", re.I)
+
+_DAY_TERMS = re.compile(r"^(hoy|ayer|ma[ñn]ana|esta\b|este\b|la semana|el (d[ií]a|mes)|"
+                        r"mi[s]?\b|los [uú]ltimos)", re.I)
+
+
+def mail_search_term(t):
+    """Término a buscar en el historial de correo, o None si es consulta del día."""
+    m = _MAILSEARCH_RE.search(t or "")
+    if not m:
+        return None
+    term = m.group(1).strip(" ?¿!.,;:").strip()
+    if not term or _DAY_TERMS.match(term):
+        return None   # «correos de hoy» → resumen del día, no búsqueda
+    return term
+
+
+# ─── Búsqueda en la memoria del vault («¿qué sé de X?») ──────────────────────
+_KNOW_RE = re.compile(
+    r"(?:qu[eé] (?:sabes|s[eé]|sabemos|hay) (?:de|sobre)\s+|"
+    r"qu[eé] tengo (?:apuntado|anotado|registrado|escrito) (?:de|sobre)\s+|"
+    r"qu[eé] informaci[oó]n (?:tengo|hay|tenemos) (?:de|sobre)\s+|"
+    r"busca en (?:mis|las) notas\s+(?:de|sobre)?\s*)"
+    r"([\w\-áéíóúñü ]{2,60})", re.I)
+
+
+def knowledge_term(t):
+    m = _KNOW_RE.search(t or "")
+    if not m:
+        return None
+    return m.group(1).strip(" ?¿!.,;:").strip() or None
+
+
 # ─── Recordatorios de Mac (Reminders.app) ────────────────────────────────────
 _REM_VERB = re.compile(r"\b(recu[eé]rda(?:me)?|recordatorio|recordar|"
                        r"an[oó]ta(?:me|lo|la)?|ap[uú]nta(?:me|lo|la)?)\b", re.I)
@@ -166,6 +233,30 @@ def is_reminder_query(t):
                           r"qu[eé] tengo en (?:la |mi )?lista|"
                           r"qu[eé] hay en (?:la |mi )?lista|"
                           r"lista del? s[uú]per|compras del s[uú]per)\b", t, re.I))
+
+
+def is_status_query(t):
+    """Pedido de 'estatus/resumen del día': junta agenda + recordatorios + pendientes."""
+    return bool(
+        re.search(r"\b(est[aá]tus|status)\b", t, re.I)
+        or re.search(r"res[uú]men.*(d[ií]a|hoy|jornada)", t, re.I)
+        or re.search(r"c[oó]mo (va|viene|pinta|est[aá]).*(d[ií]a|todo|hoy|jornada)", t, re.I)
+        or re.search(r"ponme al d[ií]a", t, re.I)
+        or re.search(r"qu[eé] tengo (hoy|para hoy|en el d[ií]a)", t, re.I)
+    )
+
+
+# ─── Captura de notas de TEXTO al vault (segundo cerebro) ────────────────────
+# Solo al INICIO del mensaje, para no chocar con recordatorios («apúntame X»
+# sigue siendo recordatorio; «apunta esto: X» / «toma nota: X» es nota al vault).
+_NOTE_PREFIX = re.compile(
+    r"^\s*(?:nota[:,]\s*|toma(?:me)? nota(?:\s+de(?:\s+que)?)?[:,\s]+|"
+    r"apunta esto[:,\s]*|guarda est[ao](?:\s+nota)?[:,\s]*)", re.I)
+
+
+def is_note_capture(t):
+    """Intención de archivar el mensaje como nota en Obsidian."""
+    return bool(_NOTE_PREFIX.match(t or ""))
 
 
 _REM_PREFIX = re.compile(
@@ -231,7 +322,7 @@ def reminder_create_flow(text):
     )
     data = {}
     try:
-        raw = _core_complete([{"role": "system", "content": sys_p},
+        raw = _extract_complete([{"role": "system", "content": sys_p},
                               {"role": "user", "content": text}])
         m = re.search(r"\{[\s\S]*\}", raw)
         if m:
@@ -288,6 +379,9 @@ def reminder_create_flow(text):
                 f"{res.get('error', 'error desconocido')}.")
 
     when_txt = f"\n📅 vence {_fmt_when(due_dt)}" if due_dt else ""
+    cm.log_event("accion", detalle=f"Recordatorio creado: «{title}» "
+                 f"(lista {res.get('list', list_name)}"
+                 + (f", vence {_fmt_when(due_dt)}" if due_dt else "") + ")")
     return (f"✅ Recordatorio creado, señor:\n«{title}»\n"
             f"Lista: {res.get('list', list_name)}{when_txt}")
 
@@ -301,6 +395,51 @@ def _core_complete(msgs):
         j = json.load(r)
     txt = j["choices"][0]["message"]["content"]
     return re.sub(r"<think>[\s\S]*?</think>", "", txt).strip()
+
+
+def _claude_complete(msgs, model=None, max_tokens=4096):
+    """Responde con Claude API usando el mismo system+contexto+historial.
+    Convierte el formato OpenAI (lista plana con 'system') al de Anthropic
+    (system aparte, mensajes user/assistant). Lanza si falla — el llamador
+    hace fail-open a Ollama."""
+    client = _get_claude()
+    system_parts, conv = [], []
+    for m in msgs:
+        role, content = m.get("role"), (m.get("content") or "")
+        if role == "system":
+            system_parts.append(content)
+        elif role in ("user", "assistant"):
+            conv.append({"role": role, "content": content})
+    if not conv or conv[0]["role"] != "user":
+        conv.insert(0, {"role": "user", "content": "(sin entrada)"})
+    resp = client.messages.create(
+        model=model or GOD_MODEL,
+        max_tokens=max_tokens,
+        system="\n\n".join(p for p in system_parts if p),
+        messages=conv,
+    )
+    out = "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+    return out.strip()
+
+
+# --- Extracción estructurada (JSON) -------------------------------------------
+# qwen local es POCO FIABLE para JSON (JARVIS.md §6.3): mete preámbulos, ignora
+# fechas relativas. Para EXTRAER (recordatorio/evento/clasificar/destilar) se usa
+# Claude Haiku (centavos por llamada) con fail-open al modelo local si no hay
+# red/key. El chat general sigue 100% local ($0).
+EXTRACT_MODEL = os.environ.get("JARVIS_EXTRACT_MODEL", "claude-haiku-4-5-20251001")
+
+
+def _extract_complete(msgs):
+    """LLM para extracción de datos: Haiku si está disponible; si no, el local.
+    Los llamadores ya traen fallback determinista, así que esto puede fallar
+    hacia qwen sin romper nada."""
+    if _claude_available():
+        try:
+            return _claude_complete(msgs, model=EXTRACT_MODEL, max_tokens=1024)
+        except Exception as e:
+            print(f"[extract] Haiku falló ({str(e)[:80]}) — uso el local", flush=True)
+    return _core_complete(msgs)
 
 
 def _fmt_when(dt):
@@ -334,7 +473,7 @@ def cal_create_flow(text):
         "hora de inicio, pon null en ese campo. Si no hay hora de fin, pon null."
     )
     try:
-        raw = _core_complete([{"role": "system", "content": sys_p},
+        raw = _extract_complete([{"role": "system", "content": sys_p},
                               {"role": "user", "content": text}])
     except Exception as e:
         return f"No pude contactar el núcleo para procesar la cita ({e}), señor."
@@ -380,6 +519,8 @@ def cal_create_flow(text):
 
     fin = f"–{end_dt.hour:02d}:{end_dt.minute:02d}" if end_dt else ""
     loc = res.get("calendar", "Calendario")
+    cm.log_event("accion", detalle=f"Evento agendado: «{title}» "
+                 f"{_fmt_when(start_dt)}{fin} ({loc})")
     return (f"✅ Agendado, señor:\n«{title}»\n{_fmt_when(start_dt)}{fin}\n"
             f"{loc} (iCloud). Ya está en su Mac.")
 
@@ -410,6 +551,14 @@ def task_context(text):
 
 
 def ask_core(chat_id, text):
+    """Responde y deja registro persistente del intercambio (memoria de Jarvis)."""
+    reply = _ask_core_inner(chat_id, text)
+    cm.log_exchange(chat_id, text, reply,
+                    mode="dios" if GOD_MODE.get(chat_id) else "local")
+    return reply
+
+
+def _ask_core_inner(chat_id, text):
     # Acciones reales (escritura). El recordatorio se evalúa ANTES que el evento:
     # un "ponme un recordatorio a las 5" no debe acabar como evento de calendario.
     if is_reminder_create(text):
@@ -418,8 +567,16 @@ def ask_core(chat_id, text):
         return cal_create_flow(text)
     # historial: solo turnos user/assistant (el contexto inyectado es por-llamada)
     hist = histories.setdefault(chat_id, [])
+    # Un "estatus del día" jala TODO lo conectado (agenda + recordatorios + pendientes).
+    status = is_status_query(text)
     msgs = [{"role": "system", "content": SYSTEM}]
-    if is_task_query(text):
+    if status:
+        msgs.append({"role": "system", "content":
+            "El usuario pide un ESTATUS DEL DÍA. Con los DATOS REALES que siguen "
+            "(agenda, recordatorios y pendientes), arma un resumen breve y organizado "
+            "en secciones (📅 Agenda · ✅ Pendientes · 🔔 Recordatorios). Usa solo los "
+            "datos provistos; si una sección viene vacía, dilo en una línea."})
+    if is_task_query(text) or status:
         ctx = task_context(text)
         if ctx:
             msgs.append({"role": "system", "content": ctx})
@@ -429,21 +586,37 @@ def ask_core(chat_id, text):
             msgs.append({"role": "system", "content": ent})
     except Exception:
         pass
-    if is_cal_query(text):
+    if is_cal_query(text) or status:
         try:
             cal = serve_hud.calendar_context(days=14)   # agenda del Calendario de Mac
             if cal:
                 msgs.append({"role": "system", "content": cal})
         except Exception:
             pass
-    if is_mail_query(text):
+    mterm = mail_search_term(text)
+    if mterm:
+        try:
+            ms = serve_hud.mail_search_context(mterm)   # historial + cuerpos
+            if ms:
+                msgs.append({"role": "system", "content": ms})
+        except Exception:
+            pass
+    elif is_mail_query(text):
         try:
             mail = serve_hud.mail_context()   # correos de hoy en Mail.app
             if mail:
                 msgs.append({"role": "system", "content": mail})
         except Exception:
             pass
-    if is_reminder_query(text):
+    kterm = knowledge_term(text)
+    if kterm:
+        try:
+            kc = serve_hud.knowledge_context(kterm)   # FTS sobre memory.db
+            if kc:
+                msgs.append({"role": "system", "content": kc})
+        except Exception:
+            pass
+    if is_reminder_query(text) or status:
         try:
             rem = serve_hud.reminders_context()   # recordatorios de Reminders.app
             if rem:
@@ -452,15 +625,17 @@ def ask_core(chat_id, text):
             pass
     msgs += hist[-8:]
     msgs.append({"role": "user", "content": text})
-    body = json.dumps({"model": MODEL, "messages": msgs, "stream": False}).encode()
-    req = urllib.request.Request(CORE + "/v1/chat/completions", data=body,
-                                 headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=180) as r:
-            j = json.load(r)
-        reply = j["choices"][0]["message"]["content"]
-        import re
-        reply = re.sub(r"<think>[\s\S]*?</think>", "", reply).strip() or "(sin respuesta)"
+        if GOD_MODE.get(chat_id):
+            # Modo dios: Claude. Si falla (red/cuota), fail-open al núcleo local.
+            try:
+                reply = _claude_complete(msgs)
+            except Exception as e:
+                reply = (f"🔻 (Modo dios no respondió: {str(e)[:80]} — uso el local)\n\n"
+                         + _core_complete(msgs))
+        else:
+            reply = _core_complete(msgs)
+        reply = reply or "(sin respuesta)"
         hist.append({"role": "user", "content": text})
         hist.append({"role": "assistant", "content": reply})
         del hist[:-8]
@@ -510,6 +685,51 @@ async def cmd_voz(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Voz {estado}, señor.")
 
 
+async def cmd_dios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Activa el 'modo dios' (Claude) en este chat. Acepta /dios on | off."""
+    if not await gate(update):
+        return
+    chat_id = update.effective_chat.id
+    if not _claude_available():
+        await update.message.reply_text(
+            "No tengo configurado Claude, señor: falta ANTHROPIC_API_KEY "
+            "(o el SDK 'anthropic') en el entorno del bot.")
+        return
+    arg = (ctx.args[0].lower() if ctx.args else "")
+    if arg in ("off", "no", "0", "normal"):
+        GOD_MODE[chat_id] = False
+    elif arg in ("on", "si", "sí", "1"):
+        GOD_MODE[chat_id] = True
+    else:
+        GOD_MODE[chat_id] = not GOD_MODE.get(chat_id)
+    if GOD_MODE[chat_id]:
+        await update.message.reply_text(
+            f"🧠 Modo dios ACTIVADO, señor — razono con {GOD_MODEL}. "
+            "Use /normal para volver al modelo local.")
+    else:
+        await update.message.reply_text(
+            "🔌 Modo dios desactivado. Vuelvo al modelo local (Ollama), señor.")
+
+
+async def cmd_normal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Vuelve al modelo local (Ollama) en este chat."""
+    if not await gate(update):
+        return
+    GOD_MODE[update.effective_chat.id] = False
+    await update.message.reply_text(
+        "🔌 Modo local (Ollama) activo, señor. Use /dios para el modo poderoso.")
+
+
+async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    """Captura excepciones para que un fallo de red o de un handler NO tumbe el bot.
+    Los errores transitorios de red se ignoran (PTB reintenta el polling solo)."""
+    err = ctx.error
+    if isinstance(err, (NetworkError, TimedOut)):
+        print(f"[net] error de red transitorio (ignorado): {err}", flush=True)
+        return
+    print(f"[error] excepción no manejada: {err!r}", flush=True)
+
+
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not await gate(update):
         return
@@ -523,6 +743,12 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             state["person"] = update.message.text.strip()
             await _do_file_and_ask_delete(ctx.bot, state, token)
             return
+
+    # captura explícita de nota de texto («toma nota: …», «apunta esto: …»)
+    if is_note_capture(update.message.text):
+        await capture_note_flow(update, ctx,
+                                _NOTE_PREFIX.sub("", update.message.text).strip())
+        return
 
     await ctx.bot.send_chat_action(chat_id, "typing")
     reply = await asyncio.to_thread(ask_core, update.effective_chat.id,
@@ -604,16 +830,27 @@ async def _send_card(bot, chat_id, state):
 
 
 async def _do_file_and_ask_delete(query_or_bot, state, token):
-    """Archiva el texto en el MD y pregunta si borrar el audio."""
+    """Archiva el texto en el MD y pregunta si borrar el audio (si lo hay)."""
     res = await asyncio.to_thread(
         vn.file_note, state["area"], state["person"], state["text"],
-        datetime.now(), state.get("source", "voz"), state.get("resumen", ""))
+        datetime.now(), state.get("source", "voz"), state.get("resumen", ""),
+        state.get("icon", "🎙️"))
     if not res.get("ok"):
         msg = f"⚠️ No pude archivar: {res.get('error')}"
         await _edit_or_send(query_or_bot, state, msg, None)
         return
     state["filed"] = res
+    cm.log_event("nota", chat_id=state.get("chat_id"),
+                 area=res["area_label"], title=res["title"],
+                 source=state.get("source", ""), resumen=state.get("resumen", ""))
     accion = "creé" if res["nuevo"] else "actualicé"
+    if not state.get("audio"):
+        # nota de texto: no hay audio que borrar → confirmación final directa
+        txt = (f"✅ Listo, señor. {accion.capitalize()} *{res['title']}* "
+               f"en _{res['area_label']}_.\n`{res['rel']}`")
+        await _edit_or_send(query_or_bot, state, txt, None)
+        PENDING.pop(token, None)
+        return
     txt = (f"✅ Listo, señor. {accion.capitalize()} *{res['title']}* "
            f"en _{res['area_label']}_.\n`{res['rel']}`\n\n¿Borro la nota de voz?")
     await _edit_or_send(query_or_bot, state, txt, _del_markup(token))
@@ -632,6 +869,31 @@ async def _edit_or_send(query_or_bot, state, text, markup):
     bot = query_or_bot if not is_query else query_or_bot.get_bot()
     await bot.send_message(state["chat_id"], text, reply_markup=markup,
                            parse_mode="Markdown")
+
+
+async def capture_note_flow(update, ctx, content):
+    """Archiva una nota de TEXTO en el vault con la misma tarjeta de botones
+    que las notas de voz (clasificación área/persona, sin paso de audio)."""
+    chat_id = update.effective_chat.id
+    if not content or len(content) < 3:
+        await update.message.reply_text(
+            "📝 ¿Qué anoto, señor? Mándeme «toma nota: …» con el contenido.")
+        return
+    await ctx.bot.send_chat_action(chat_id, "typing")
+    cls = await asyncio.to_thread(vn.classify, content, _extract_complete)
+    state = {"text": content, "area": cls["area"], "person": cls["person"],
+             "resumen": cls["resumen"], "confidence": cls["confidence"],
+             "candidates": cls["candidates"], "audio": None,
+             "tg_voice_msg_id": None, "source": "Telegram texto",
+             "icon": "📝", "chat_id": chat_id}
+    await _send_card(ctx.bot, chat_id, state)
+
+
+async def cmd_nota(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/nota <texto> — archiva el texto como nota en Obsidian."""
+    if not await gate(update):
+        return
+    await capture_note_flow(update, ctx, " ".join(ctx.args).strip() if ctx.args else "")
 
 
 async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -656,7 +918,7 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("🤔 No alcancé a entender nada del audio, señor.")
         return
 
-    cls = await asyncio.to_thread(vn.classify, text, _core_complete)
+    cls = await asyncio.to_thread(vn.classify, text, _extract_complete)
     state = {"text": text, "area": cls["area"], "person": cls["person"],
              "resumen": cls["resumen"], "confidence": cls["confidence"],
              "candidates": cls["candidates"], "audio": str(ogg),
@@ -803,7 +1065,7 @@ async def watch_voice_memos(app):
                         text = await transcribe_audio(p)
                         if not text:
                             continue
-                        cls = await asyncio.to_thread(vn.classify, text, _core_complete)
+                        cls = await asyncio.to_thread(vn.classify, text, _extract_complete)
                         state = {"text": text, "area": cls["area"], "person": cls["person"],
                                  "resumen": cls["resumen"], "confidence": cls["confidence"],
                                  "candidates": cls["candidates"], "audio": str(p),
@@ -820,9 +1082,200 @@ async def watch_voice_memos(app):
         await asyncio.sleep(30)
 
 
+# -------- Briefs proactivos (mañana y noche) ------------------------------------
+BRIEF_STATE = Path.home() / ".openjarvis" / "briefs_state.json"
+BRIEF_MORNING = os.environ.get("JARVIS_BRIEF_MORNING", "07:00")
+BRIEF_EVENING = os.environ.get("JARVIS_BRIEF_EVENING", "21:00")
+BRIEFS_ON = os.environ.get("JARVIS_BRIEFS", "on").lower() not in ("off", "0", "no")
+_TG_MAX = 3900  # margen bajo el límite de 4096 de Telegram
+
+
+def _brief_llm(msgs, fallback_parts):
+    """Redacta el brief con el LLM local; si falla, manda los datos crudos
+    (mejor un brief feo que ningún brief)."""
+    try:
+        out = _core_complete(msgs)
+        if out:
+            return out[:_TG_MAX]
+    except Exception as e:
+        print(f"[brief] LLM falló ({e}) — mando datos crudos", flush=True)
+    raw = "\n\n".join(p for p in fallback_parts if p)
+    return raw[:_TG_MAX] if raw else "Sin datos disponibles para el brief, señor."
+
+
+def morning_brief_text():
+    """Brief de la mañana: agenda de hoy + pendientes + recordatorios + correo."""
+    parts = []
+    for getter in (lambda: task_context(""),
+                   lambda: serve_hud.calendar_context(days=2),
+                   lambda: serve_hud.reminders_context(),
+                   lambda: serve_hud.mail_context()):
+        try:
+            ctx = getter()
+            if ctx:
+                parts.append(ctx)
+        except Exception:
+            pass
+    msgs = [{"role": "system", "content": SYSTEM},
+            {"role": "system", "content":
+             "Redacta el BRIEF DE LA MAÑANA para Juan con los DATOS REALES que "
+             "siguen. Formato: saludo de una línea y secciones 📅 Hoy · "
+             "⚠️ Vencidas/urgente · ✅ Pendientes clave · 🔔 Recordatorios · "
+             "📧 Correo (solo lo importante). Breve y accionable; enfócate en HOY. "
+             "Usa solo los datos provistos; sección sin datos = una línea."}]
+    msgs += [{"role": "system", "content": p} for p in parts]
+    msgs.append({"role": "user", "content": "Buenos días, dame mi brief del día."})
+    return "☀️ " + _brief_llm(msgs, parts)
+
+
+def evening_brief_text():
+    """Cierre del día: destila el diario, reporta qué quedó abierto y qué viene."""
+    diary = cm.distill_day(complete=_extract_complete)
+    parts = []
+    try:
+        data = serve_hud.scan_tasks()
+        manana = (datetime.now().date() + timedelta(days=1)).isoformat()
+        lines = []
+        if data["overdue"]:
+            lines.append("VENCIDAS: " + " · ".join(
+                f"{t['text']} [{t['project']}, {t['due']}]" for t in data["overdue"]))
+        if data["due_today"]:
+            lines.append("QUEDARON ABIERTAS HOY: " + " · ".join(
+                f"{t['text']} [{t['project']}]" for t in data["due_today"]))
+        vence_manana = [t for t in data["upcoming"] if t["due"] == manana]
+        if vence_manana:
+            lines.append("VENCEN MAÑANA: " + " · ".join(
+                f"{t['text']} [{t['project']}]" for t in vence_manana))
+        if lines:
+            parts.append("DATOS REALES de pendientes (Obsidian):\n" + "\n".join(lines))
+    except Exception:
+        pass
+    try:
+        cal = serve_hud.calendar_context(days=2)
+        if cal:
+            parts.append(cal)
+    except Exception:
+        pass
+    msgs = [{"role": "system", "content": SYSTEM},
+            {"role": "system", "content":
+             "Redacta el CIERRE DEL DÍA para Juan con los DATOS REALES que siguen. "
+             "Formato: 2-3 líneas de balance, luego secciones ⏳ Quedó abierto · "
+             "📅 Mañana (agenda y vencimientos). Breve, sereno. Usa solo los datos "
+             "provistos; si no hay nada en una sección, dilo en una línea."}]
+    msgs += [{"role": "system", "content": p} for p in parts]
+    msgs.append({"role": "user", "content": "Dame el cierre del día."})
+    txt = "🌙 " + _brief_llm(msgs, parts)
+    if diary.get("ok"):
+        txt += f"\n\n📓 Diario del día guardado en Obsidian:\n`{diary['rel']}`"
+    return txt
+
+
+def _run_vault_sync():
+    """Sync incremental del índice del vault (memory.db) — mantiene fresca la
+    búsqueda «¿qué sé de X?». Corre tras el cierre nocturno. Best-effort."""
+    import subprocess
+    env = dict(os.environ)
+    env["PATH"] = (str(Path.home() / ".local/bin") + os.pathsep
+                   + env.get("PATH", ""))   # sync_vault llama a `uv` internamente
+    script = Path(__file__).resolve().parent / "sync_vault.py"
+    try:
+        r = subprocess.run([sys.executable, str(script)], env=env,
+                           capture_output=True, text=True, timeout=1800)
+        out = (r.stdout or r.stderr or "").strip()
+        print(f"[sync] vault → memoria: {out[-200:] or 'sin salida'}", flush=True)
+    except Exception as e:
+        print(f"[sync] omitido (no crítico): {e}", flush=True)
+
+
+def _brief_state():
+    try:
+        return json.loads(BRIEF_STATE.read_text())
+    except Exception:
+        return {}
+
+
+def _brief_mark(kind, day):
+    st = _brief_state()
+    st[kind] = day
+    try:
+        BRIEF_STATE.write_text(json.dumps(st))
+    except Exception:
+        pass
+
+
+async def _send_brief(bot, kind):
+    """Genera y envía un brief al dueño. kind: 'morning' | 'evening'."""
+    chat = _owner_chat()
+    if not chat:
+        return False
+    builder = morning_brief_text if kind == "morning" else evening_brief_text
+    try:
+        text = await asyncio.to_thread(builder)
+    except Exception as e:
+        print(f"[brief] no pude armar el brief {kind}: {e}", flush=True)
+        return False
+    await bot.send_message(int(chat), text)
+    cm.log_event("brief", chat_id=int(chat),
+                 tipo="mañana" if kind == "morning" else "noche")
+    return True
+
+
+async def daily_briefs(app):
+    """Tarea de fondo: brief a las BRIEF_MORNING y cierre a las BRIEF_EVENING.
+    Estado en disco para no duplicar tras reinicios (KeepAlive respawnea seguido).
+    Si la Mac dormía a la hora exacta, se envía al despertar (con ventana)."""
+    print(f"[brief] briefs proactivos {'activos' if BRIEFS_ON else 'APAGADOS'} "
+          f"(mañana {BRIEF_MORNING}, noche {BRIEF_EVENING})", flush=True)
+    while True:
+        try:
+            if BRIEFS_ON:
+                now = datetime.now()
+                today = now.date().isoformat()
+                hm = now.strftime("%H:%M")
+                st = _brief_state()
+                # mañana: desde BRIEF_MORNING, con ventana hasta las 14:00
+                if (st.get("morning") != today and BRIEF_MORNING <= hm < "14:00"):
+                    if await _send_brief(app.bot, "morning"):
+                        _brief_mark("morning", today)
+                # noche: desde BRIEF_EVENING hasta el fin del día
+                if st.get("evening") != today and hm >= BRIEF_EVENING:
+                    if await _send_brief(app.bot, "evening"):
+                        _brief_mark("evening", today)
+                        # con el día cerrado, refresca el índice del vault
+                        await asyncio.to_thread(_run_vault_sync)
+        except Exception as e:
+            print(f"[brief] loop: {e}", flush=True)
+        await asyncio.sleep(60)
+
+
+async def cmd_brief(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/brief — manda el brief de la mañana ahora mismo (a demanda)."""
+    if not await gate(update):
+        return
+    await ctx.bot.send_chat_action(update.effective_chat.id, "typing")
+    text = await asyncio.to_thread(morning_brief_text)
+    await update.message.reply_text(text)
+
+
+async def cmd_diario(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/diario — destila el día a la nota de Obsidian ahora mismo."""
+    if not await gate(update):
+        return
+    await ctx.bot.send_chat_action(update.effective_chat.id, "typing")
+    res = await asyncio.to_thread(cm.distill_day, None, _extract_complete)
+    if res.get("ok"):
+        await update.message.reply_text(
+            f"📓 Diario del día actualizado, señor ({res['chats']} turnos):\n"
+            f"`{res['rel']}`", parse_mode="Markdown")
+    else:
+        await update.message.reply_text(
+            f"📓 No generé el diario: {res.get('reason', 'error desconocido')}.")
+
+
 async def _post_init(app):
     app.create_task(watch_voice_memos(app))
     print("[memos] vigilante de Memos de voz activo (cada 30s)", flush=True)
+    app.create_task(daily_briefs(app))
 
 
 def wait_for_network(host="api.telegram.org", timeout=120):
@@ -843,21 +1296,45 @@ def wait_for_network(host="api.telegram.org", timeout=120):
     return False
 
 
+def build_app():
+    app = ApplicationBuilder().token(TOKEN).post_init(_post_init).build()
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("voz", cmd_voz))
+    app.add_handler(CommandHandler("dios", cmd_dios))
+    app.add_handler(CommandHandler("normal", cmd_normal))
+    app.add_handler(CommandHandler("nota", cmd_nota))
+    app.add_handler(CommandHandler("brief", cmd_brief))
+    app.add_handler(CommandHandler("diario", cmd_diario))
+    app.add_handler(CallbackQueryHandler(on_button, pattern=r"^vn\|"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
+    app.add_error_handler(on_error)
+    return app
+
+
 def main():
-    wait_for_network()
     ALLOW_FILE.parent.mkdir(parents=True, exist_ok=True)
     if not ALLOW_FILE.exists():
         ALLOW_FILE.write_text("")  # vacío = lockdown hasta autorizar un ID
     print(f"JARVIS Telegram → núcleo {CORE} · allowlist: {ALLOW_FILE}", flush=True)
     print(f"IDs autorizados: {allowed_ids() or '(ninguno — manda un mensaje al bot)'}",
           flush=True)
-    app = ApplicationBuilder().token(TOKEN).post_init(_post_init).build()
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("voz", cmd_voz))
-    app.add_handler(CallbackQueryHandler(on_button, pattern=r"^vn\|"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice))
-    app.run_polling(drop_pending_updates=True)
+    print(f"Modo dios disponible: {'sí (' + GOD_MODEL + ')' if _claude_available() else 'no (sin ANTHROPIC_API_KEY)'}",
+          flush=True)
+    # Loop supervisor: si el polling cae por un fallo de red que escala,
+    # esperamos a que vuelva el DNS y reintentamos en vez de morir. launchd
+    # (KeepAlive) sigue como último respaldo si el proceso muere del todo.
+    while True:
+        wait_for_network()
+        try:
+            build_app().run_polling(drop_pending_updates=True)
+            break  # salida limpia (SIGTERM/SIGINT) → no reiniciar
+        except (NetworkError, TimedOut, OSError) as e:
+            print(f"[supervisor] polling cayó por red ({e}); reintento en 5s", flush=True)
+            time.sleep(5)
+        except Exception as e:
+            print(f"[supervisor] polling cayó ({e!r}); reintento en 10s", flush=True)
+            time.sleep(10)
 
 
 if __name__ == "__main__":
