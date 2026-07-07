@@ -215,6 +215,22 @@ jarvis channel send telegram "Build completed successfully"
 jarvis channel status
 ```
 
+### Connect a Live Channel (WhatsApp pairing)
+
+Start a channel in the foreground and stream incoming messages. For
+`whatsapp_baileys` this pairs your personal WhatsApp account: a QR code is
+printed to the terminal — scan it in WhatsApp under **Settings → Linked
+Devices → Link a Device**. After pairing, incoming messages are printed live
+until you press `Ctrl+C`.
+
+```bash
+jarvis channel connect --channel-type whatsapp_baileys
+```
+
+The pairing state is saved under `~/.openjarvis/whatsapp_baileys_bridge/auth/`,
+so subsequent connects reconnect automatically without a new QR scan. The
+Node.js bridge is built on first use (requires Node.js 22+ on `PATH`).
+
 ---
 
 ## API Server Endpoints
@@ -530,7 +546,7 @@ If `ready` is `false`, the Messaging tab shows a "Disconnected" badge with a "Re
 `WhatsAppBaileysChannel` is registered as `"whatsapp_baileys"` in `ChannelRegistry` and provides **bidirectional WhatsApp messaging** using the Baileys protocol. It spawns a Node.js bridge subprocess that handles QR-code authentication, incoming message forwarding, and outbound message delivery.
 
 !!! warning "Node.js 22+ required"
-    The Baileys bridge is a compiled Node.js application bundled inside the package. It is auto-installed to `~/.openjarvis/whatsapp_baileys_bridge/` on first `connect()` call. If `node` is not found on `PATH`, `connect()` logs an error and sets the channel to `ChannelStatus.ERROR`.
+    The Baileys bridge ships as TypeScript source bundled inside the package. On the first `connect()` call it is copied to `~/.openjarvis/whatsapp_baileys_bridge/`, its dependencies are installed with `npm install`, and it is compiled with `tsc` — all automatically. Subsequent connects reuse the build. If `node`/`npm` are not found on `PATH`, `connect()` logs an error and sets the channel to `ChannelStatus.ERROR`.
 
 !!! note "WhatsApp account required"
     WhatsApp does not offer an official API for personal accounts. Baileys operates on the WhatsApp Web protocol. You must scan a QR code with your WhatsApp mobile app to authenticate on first use.

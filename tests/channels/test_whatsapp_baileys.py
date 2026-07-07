@@ -331,3 +331,101 @@ class TestReaderLoop:
             }
         )
         bad_handler.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# QR handling
+# ---------------------------------------------------------------------------
+
+
+class TestQRHandling:
+    def test_on_qr_handler_invoked(self):
+        ch = WhatsAppBaileysChannel()
+        handler = MagicMock()
+        ch.on_qr(handler)
+
+        ch._handle_bridge_event({"type": "qr", "data": "qr-payload"})
+
+        handler.assert_called_once_with("qr-payload")
+        assert ch.get_qr() == "qr-payload"
+
+    def test_get_qr_empty_by_default(self):
+        ch = WhatsAppBaileysChannel()
+        assert ch.get_qr() == ""
+
+    def test_qr_handler_exception_does_not_crash(self):
+        ch = WhatsAppBaileysChannel()
+        ch.on_qr(MagicMock(side_effect=ValueError("boom")))
+
+        # Should not raise even if a handler blows up.
+        ch._handle_bridge_event({"type": "qr", "data": "qr-payload"})
+        assert ch.get_qr() == "qr-payload"
+
+
+# ---------------------------------------------------------------------------
+# stderr draining
+# ---------------------------------------------------------------------------
+
+
+class TestStderrLoop:
+    def test_stderr_forwarded_to_handler(self):
+        ch = WhatsAppBaileysChannel()
+        ch._stop_event = threading.Event()
+
+        received: list[str] = []
+        ch.set_stderr_handler(received.append)
+
+        mock_proc = MagicMock()
+        mock_proc.stderr = ["QR line one\n", "QR line two\n"]
+        ch._process = mock_proc
+
+        ch._stderr_loop()
+
+        assert received == ["QR line one", "QR line two"]
+
+    def test_stderr_loop_without_handler_does_not_crash(self):
+        ch = WhatsAppBaileysChannel()
+        ch._stop_event = threading.Event()
+
+        mock_proc = MagicMock()
+        mock_proc.stderr = ["some noise\n"]
+        ch._process = mock_proc
+
+        # No handler set -> falls back to debug logging, must not raise.
+        ch._stderr_loop()
+
+    def test_stderr_handler_exception_does_not_crash(self):
+        ch = WhatsAppBaileysChannel()
+        ch._stop_event = threading.Event()
+        ch.set_stderr_handler(MagicMock(side_effect=ValueError("boom")))
+
+        mock_proc = MagicMock()
+        mock_proc.stderr = ["line\n"]
+        ch._process = mock_proc
+
+        ch._stderr_loop()
+
+
+# ---------------------------------------------------------------------------
+# _ensure_bridge reuse of an existing build
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureBridgeReuse:
+    def test_uses_existing_build_without_npm(self, tmp_path):
+        ch = WhatsAppBaileysChannel()
+        ch._runtime_dir = tmp_path
+
+        (tmp_path / "node_modules").mkdir()
+        bridge_js = tmp_path / "dist" / "bridge.js"
+        bridge_js.parent.mkdir(parents=True, exist_ok=True)
+        bridge_js.write_text("// prebuilt bridge")
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/node"),
+            patch.object(WhatsAppBaileysChannel, "_run_npm") as run_npm,
+        ):
+            result = ch._ensure_bridge()
+
+        assert result == bridge_js
+        run_npm.assert_not_called()

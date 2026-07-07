@@ -30,6 +30,20 @@ function emit(event: Record<string, unknown>): void {
   process.stdout.write(JSON.stringify(event) + "\n");
 }
 
+// Minimal pino-compatible no-op logger.  Keeps Baileys' internal chatter off
+// stderr so the only thing written there is the scannable QR code, which the
+// Python side forwards to the user's terminal during pairing.
+const silentLogger: any = {
+  level: "silent",
+  child: () => silentLogger,
+  trace: () => {},
+  debug: () => {},
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  fatal: () => {},
+};
+
 function parseArgs(): { authDir: string } {
   const args = process.argv.slice(2);
   let authDir = "./auth";
@@ -57,6 +71,7 @@ async function main(): Promise<void> {
     sock = makeWASocket({
       auth: state,
       printQRInTerminal: false,
+      logger: silentLogger,
     });
 
     sock.ev.on("creds.update", saveCreds);
@@ -73,9 +88,7 @@ async function main(): Promise<void> {
       }
 
       if (connection === "close") {
-        const statusCode =
-          (lastDisconnect?.error as any)?.output?.statusCode ??
-          DisconnectReason.unknown;
+        const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
 
         if (statusCode === DisconnectReason.loggedOut) {
           emit({ type: "status", status: "disconnected" });

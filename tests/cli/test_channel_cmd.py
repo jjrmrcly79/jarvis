@@ -42,6 +42,7 @@ class TestChannelHelp:
         assert "list" in result.output
         assert "send" in result.output
         assert "status" in result.output
+        assert "connect" in result.output
 
 
 class TestChannelList:
@@ -91,6 +92,62 @@ class TestChannelSend:
             )
         assert result.exit_code == 0
         assert "Failed to send" in result.output
+
+
+class TestChannelConnect:
+    def test_connect_streams_and_disconnects(self) -> None:
+        config_p, getch_p, inst = _patch_channel(
+            status_return=ChannelStatus.CONNECTED,
+        )
+        # Stop the listen loop on the first sleep so the test terminates.
+        sleep_p = mock.patch(
+            "time.sleep", side_effect=KeyboardInterrupt
+        )
+        with config_p, getch_p, sleep_p:
+            result = CliRunner().invoke(
+                cli,
+                ["channel", "connect", "--channel-type", "whatsapp_baileys"],
+            )
+
+        assert result.exit_code == 0
+        assert "Connected" in result.output
+        assert "disconnected" in result.output.lower()
+        inst.connect.assert_called_once()
+        inst.on_message.assert_called_once()
+        inst.disconnect.assert_called_once()
+
+    def test_connect_registers_qr_surface(self) -> None:
+        config_p, getch_p, inst = _patch_channel(
+            status_return=ChannelStatus.CONNECTED,
+        )
+        sleep_p = mock.patch("time.sleep", side_effect=KeyboardInterrupt)
+        with config_p, getch_p, sleep_p:
+            CliRunner().invoke(
+                cli,
+                ["channel", "connect", "--channel-type", "whatsapp_baileys"],
+            )
+        # QR pairing surfaces registered for bridge-style channels.
+        inst.set_stderr_handler.assert_called_once()
+        inst.on_qr.assert_called_once()
+
+    def test_connect_unsupported_channel(self) -> None:
+        cfg = mock.MagicMock()
+        cfg.channel.default_channel = ""
+        # A channel object that lacks on_message is not a live channel.
+        limited = mock.MagicMock(spec=["connect", "status", "disconnect"])
+        config_p = mock.patch(
+            "openjarvis.core.config.load_config", return_value=cfg
+        )
+        getch_p = mock.patch(
+            "openjarvis.cli.channel_cmd._get_channel", return_value=limited
+        )
+        with config_p, getch_p:
+            result = CliRunner().invoke(
+                cli, ["channel", "connect", "--channel-type", "whatsapp"]
+            )
+        assert result.exit_code == 0
+        assert "does not support live connections" in result.output
+        limited.connect.assert_not_called()
 
 
 class TestChannelStatus:

@@ -138,9 +138,7 @@ def _get_channel(
         import os
 
         kwargs["api_key_id"] = os.environ.get("SENDBLUE_API_KEY_ID", "")
-        kwargs["api_secret_key"] = os.environ.get(
-            "SENDBLUE_API_SECRET_KEY", ""
-        )
+        kwargs["api_secret_key"] = os.environ.get("SENDBLUE_API_SECRET_KEY", "")
         kwargs["from_number"] = os.environ.get("SENDBLUE_FROM_NUMBER", "")
         sbc = getattr(config.channel, "sendblue", None)
         if sbc:
@@ -232,6 +230,98 @@ def channel_send(
         console.print(
             f"[red]Failed to send message to {target}[/red]",
         )
+
+
+@channel.command("connect")
+@click.option(
+    "--channel-type",
+    default=None,
+    help=_CHANNEL_TYPE_HELP,
+)
+def channel_connect(
+    channel_type: Optional[str],
+) -> None:
+    """Connect a live channel and stream incoming messages.
+
+    Spawns the channel backend (for ``whatsapp_baileys`` this pairs your
+    personal WhatsApp account by QR code), prints the QR to scan, and then
+    prints each incoming message until interrupted with Ctrl+C.
+
+    Example::
+
+        jarvis channel connect --channel-type whatsapp_baileys
+    """
+    import time
+
+    console = Console()
+    from openjarvis.core.config import load_config
+
+    config = load_config()
+
+    try:
+        ch = _get_channel(channel_type, config)
+    except click.ClickException as exc:
+        console.print(f"[red]{exc.message}[/red]")
+        return
+
+    key = (
+        channel_type
+        or config.channel.default_channel
+        or getattr(ch, "channel_id", "unknown")
+    )
+
+    if not (hasattr(ch, "connect") and hasattr(ch, "on_message")):
+        console.print(f"[red]Channel '{key}' does not support live connections.[/red]")
+        return
+
+    # Surface the pairing QR.  Bridge-based channels (e.g. whatsapp_baileys)
+    # render a scannable ASCII QR to their subprocess stderr; forward it
+    # verbatim so it stays scannable.
+    if hasattr(ch, "set_stderr_handler"):
+        ch.set_stderr_handler(lambda line: click.echo(line))
+    if hasattr(ch, "on_qr"):
+        ch.on_qr(
+            lambda _data: console.print(
+                "\n[bold cyan]Scan this QR in WhatsApp → Settings → "
+                "Linked Devices → Link a Device:[/bold cyan]\n"
+            )
+        )
+
+    def _on_message(msg: Any) -> None:
+        sender = getattr(msg, "sender", "") or getattr(msg, "conversation_id", "")
+        content = getattr(msg, "content", "")
+        console.print(f"[green]{sender}[/green]: {content}")
+
+    ch.on_message(_on_message)
+
+    console.print(f"[cyan]Connecting channel:[/cyan] {key}")
+    ch.connect()
+
+    last_status: Any = None
+    try:
+        while True:
+            st = ch.status()
+            if st != last_status:
+                if st.value == "connected":
+                    console.print(
+                        "[green]✓ Connected. Listening for messages "
+                        "(press Ctrl+C to stop)…[/green]"
+                    )
+                elif st.value == "error":
+                    console.print(
+                        "[red]Channel entered an error state. "
+                        "Run with logging enabled for details.[/red]"
+                    )
+                last_status = st
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Disconnecting…[/yellow]")
+    finally:
+        try:
+            ch.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+        console.print("[dim]Channel disconnected.[/dim]")
 
 
 @channel.command("status")
