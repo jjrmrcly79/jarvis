@@ -241,13 +241,25 @@ each incoming message through the LLM and detect actionable **tasks** and
 jarvis channel connect --channel-type whatsapp_baileys --extract-tasks
 ```
 
-On macOS, add `--to-reminders` to also create entries in **Reminders.app** (in
-the `WhatsApp` list by default, configurable with `--reminders-list`), where the
-HUD's agenda/reminders panels pick them up automatically:
+Route the extracted items to where you already look:
+
+- `--to-reminders` (macOS) creates entries in **Reminders.app** — in the
+  `WhatsApp` list by default, configurable with `--reminders-list` — where the
+  HUD's agenda/reminders panels pick them up.
+- `--to-obsidian` appends **tasks** as `- [ ] Title 📅 YYYY-MM-DD` checkboxes to
+  an Obsidian note (`Bandeja de WhatsApp.md` by default, `--obsidian-note` to
+  change it), read by the HUD's pending-task scanner. The vault is taken from
+  `--vault`, then `$VAULT`, then the standard iCloud location. Meetings are not
+  written here.
 
 ```bash
-jarvis channel connect --channel-type whatsapp_baileys --to-reminders
+# tasks → Obsidian, meetings → Reminders (no duplication)
+jarvis channel connect --channel-type whatsapp_baileys --to-reminders --to-obsidian
 ```
+
+When both flags are set, tasks go to Obsidian and meetings to Reminders so a
+task never appears in two HUD panels. Use either flag on its own to send
+everything to a single destination.
 
 Extraction uses the same engine/model resolution as `jarvis ask` (start Ollama
 or set a cloud API key). Relative dates like "mañana" or "el viernes" are
@@ -263,8 +275,10 @@ jarvis channel inbox --kind meeting  # meetings only
 
 Programmatically, the same pipeline is available via
 `openjarvis.channels.task_extraction.MessageTaskExtractor` (portable, JSONL
-store) with an optional `sink` callback for custom delivery; the bundled
-`openjarvis.channels.task_sinks.AppleRemindersSink` targets macOS Reminders.
+store) with an optional `sink` callback for custom delivery. Bundled sinks in
+`openjarvis.channels.task_sinks` — `AppleRemindersSink` (macOS Reminders) and
+`ObsidianTasksSink` (checkboxes in a vault note) — can be composed with
+`combine_sinks(...)`.
 
 ---
 

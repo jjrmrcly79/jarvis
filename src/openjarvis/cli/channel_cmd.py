@@ -283,11 +283,31 @@ def _resolve_engine_model(config: Any) -> Any:
     default="WhatsApp",
     help="Reminders.app list for --to-reminders (default: WhatsApp).",
 )
+@click.option(
+    "--to-obsidian/--no-to-obsidian",
+    default=False,
+    help="Also append extracted tasks as checkboxes to an Obsidian note "
+    "(implies --extract-tasks). Meetings are not written here.",
+)
+@click.option(
+    "--obsidian-note",
+    default="Bandeja de WhatsApp.md",
+    help="Note (relative to the vault) for --to-obsidian.",
+)
+@click.option(
+    "--vault",
+    default="",
+    help="Obsidian vault path for --to-obsidian (falls back to $VAULT, then "
+    "the standard iCloud location).",
+)
 def channel_connect(
     channel_type: Optional[str],
     extract_tasks: bool,
     to_reminders: bool,
     reminders_list: str,
+    to_obsidian: bool,
+    obsidian_note: str,
+    vault: str,
 ) -> None:
     """Connect a live channel and stream incoming messages.
 
@@ -297,12 +317,15 @@ def channel_connect(
 
     With ``--extract-tasks`` each incoming message is run through the LLM to
     detect actionable tasks and meetings, which are saved for later review
-    (see ``jarvis channel inbox``).  Add ``--to-reminders`` on macOS to also
-    push them into Reminders.app, where the HUD picks them up.
+    (see ``jarvis channel inbox``).  Route them to where you already look:
+    ``--to-reminders`` (macOS Reminders.app) and/or ``--to-obsidian`` (tasks as
+    checkboxes in an Obsidian note).  When both are set, tasks go to Obsidian
+    and meetings to Reminders so nothing is duplicated.
 
     Example::
 
-        jarvis channel connect --channel-type whatsapp_baileys --to-reminders
+        jarvis channel connect --channel-type whatsapp_baileys \\
+            --to-reminders --to-obsidian
     """
     import time
 
@@ -342,7 +365,7 @@ def channel_connect(
 
     # Build the task/meeting extractor when requested.
     extractor = None
-    if extract_tasks or to_reminders:
+    if extract_tasks or to_reminders or to_obsidian:
         resolved = _resolve_engine_model(config)
         if resolved is None:
             console.print(
@@ -352,22 +375,42 @@ def channel_connect(
             )
         else:
             engine, model = resolved
-            sink = None
+            from openjarvis.channels.task_sinks import combine_sinks
+
+            sinks = []
             if to_reminders:
                 from openjarvis.channels.task_sinks import AppleRemindersSink
 
-                sink = AppleRemindersSink(list_name=reminders_list)
-                if not sink.available:
+                # When Obsidian also handles tasks, keep Reminders for meetings
+                # only so nothing is duplicated across the two HUD panels.
+                rem_kinds = ("meeting",) if to_obsidian else None
+                rem = AppleRemindersSink(list_name=reminders_list, kinds=rem_kinds)
+                sinks.append(rem)
+                if not rem.available:
                     console.print(
                         "[yellow]--to-reminders is macOS-only; extracted items "
                         "will be saved but not pushed to Reminders.app.[/yellow]"
                     )
+            if to_obsidian:
+                from openjarvis.channels.task_sinks import ObsidianTasksSink
+
+                obs = ObsidianTasksSink(vault or None, note=obsidian_note)
+                sinks.append(obs)
+                if not obs.available:
+                    console.print(
+                        "[yellow]--to-obsidian: vault not found (set --vault or "
+                        "$VAULT); tasks will be saved but not written to a "
+                        "note.[/yellow]"
+                    )
+
             from openjarvis.channels.task_extraction import (
                 MessageTaskExtractor,
                 default_store_path,
             )
 
-            extractor = MessageTaskExtractor(engine, model=model, sink=sink)
+            extractor = MessageTaskExtractor(
+                engine, model=model, sink=combine_sinks(*sinks)
+            )
             console.print(
                 f"[cyan]Task extraction on[/cyan] (model: {model}) → "
                 f"{default_store_path()}"

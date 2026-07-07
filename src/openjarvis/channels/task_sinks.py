@@ -1,21 +1,29 @@
 """Downstream sinks for extracted tasks/meetings.
 
 A *sink* takes an :class:`~openjarvis.channels.task_extraction.ExtractedItem`
-and delivers it somewhere the user actually looks.  The Apple Reminders sink
-below targets macOS ``Reminders.app`` via ``osascript`` — the same surface the
-OpenJarvis HUD reads for its agenda/reminders panels — so items extracted from
-WhatsApp show up there automatically.
+and delivers it somewhere the user actually looks:
+
+- :class:`AppleRemindersSink` targets macOS ``Reminders.app`` via ``osascript``
+  — the surface the HUD reads for its agenda/reminders panels.
+- :class:`ObsidianTasksSink` appends ``- [ ] …`` checkboxes to a note in an
+  Obsidian vault — the surface the HUD's pending-task scanner reads.
+
+Both share the same call signature so they can be combined with
+:func:`combine_sinks`.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import platform
+import re
 import subprocess
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Sequence
 
-from openjarvis.channels.task_extraction import ExtractedItem
+from openjarvis.channels.task_extraction import ExtractedItem, Sink
 
 logger = logging.getLogger(__name__)
 
@@ -76,15 +84,23 @@ class AppleRemindersSink:
         does not exist.
     default_due_hour:
         Hour of day to use when an item has a due *date* but no time.
+    kinds:
+        Restrict to these item kinds (e.g. ``("meeting",)``).  ``None`` accepts
+        both tasks and meetings.
 
     On non-macOS systems the sink is a no-op (logs a debug message).
     """
 
     def __init__(
-        self, list_name: str = "WhatsApp", *, default_due_hour: int = 9
+        self,
+        list_name: str = "WhatsApp",
+        *,
+        default_due_hour: int = 9,
+        kinds: Optional[Sequence[str]] = None,
     ) -> None:
         self._list = list_name
         self._default_due_hour = default_due_hour
+        self._kinds = tuple(kinds) if kinds else None
 
     @property
     def available(self) -> bool:
@@ -93,6 +109,8 @@ class AppleRemindersSink:
 
     def __call__(self, item: ExtractedItem) -> None:
         """Create a reminder for *item* (no-op off macOS)."""
+        if self._kinds is not None and item.kind not in self._kinds:
+            return
         if not self.available:
             logger.debug("AppleRemindersSink skipped: not macOS")
             return
@@ -148,4 +166,165 @@ class AppleRemindersSink:
             )
 
 
-__all__ = ["AppleRemindersSink"]
+# ---------------------------------------------------------------------------
+# Obsidian
+# ---------------------------------------------------------------------------
+
+# Standard iCloud location for an Obsidian vault (``~`` expands per user).
+_DEFAULT_VAULT = (
+    Path.home() / "Library" / "Mobile Documents" / "iCloud~md~obsidian" / "Documents"
+)
+
+# Matches an existing open checkbox line: ``- [ ] some text``.
+_OPEN_CHECKBOX_RE = re.compile(r"^\s*[-*]\s+\[ \]\s*(.+?)\s*$")
+# Trailing due-date marker the HUD understands: ``📅 2026-07-08``.
+_DUE_MARKER_RE = re.compile(r"\s*(?:📅|due:?|vence:?)\s*\d{4}-\d{2}-\d{2}\s*$", re.I)
+
+
+def _resolve_vault(vault_path: Optional[str]) -> Path:
+    """Resolve the vault directory: explicit arg > ``VAULT`` env > iCloud default."""
+    if vault_path:
+        return Path(vault_path).expanduser()
+    env = os.environ.get("VAULT", "")
+    if env:
+        return Path(env).expanduser()
+    return _DEFAULT_VAULT
+
+
+class ObsidianTasksSink:
+    """Append extracted *tasks* as ``- [ ]`` checkboxes to an Obsidian note.
+
+    Meetings are ignored (route those to a calendar/reminders sink).  The note
+    is created if missing.  The line format — ``- [ ] Title 📅 YYYY-MM-DD`` — is
+    exactly what the HUD's pending-task scanner reads, so tasks land in the
+    "pendientes" panel.
+
+    Parameters
+    ----------
+    vault_path:
+        Vault directory.  Falls back to the ``VAULT`` env var, then the standard
+        iCloud Obsidian path.
+    note:
+        Note (relative to the vault) to append to.  Defaults to
+        ``"Bandeja de WhatsApp.md"``.
+    dedupe:
+        Skip appending when an open checkbox with the same title already exists
+        in the note.
+    """
+
+    def __init__(
+        self,
+        vault_path: Optional[str] = None,
+        *,
+        note: str = "Bandeja de WhatsApp.md",
+        dedupe: bool = True,
+    ) -> None:
+        self._vault = _resolve_vault(vault_path)
+        self._note = note
+        self._dedupe = dedupe
+
+    @property
+    def available(self) -> bool:
+        """True when the vault directory exists."""
+        return self._vault.is_dir()
+
+    def _target(self) -> Optional[Path]:
+        """Resolve the note path, ensuring it stays inside the vault."""
+        target = (self._vault / self._note).resolve()
+        try:
+            target.relative_to(self._vault.resolve())
+        except ValueError:
+            logger.warning("ObsidianTasksSink: note escapes the vault: %s", self._note)
+            return None
+        return target
+
+    def __call__(self, item: ExtractedItem) -> None:
+        """Append *item* as a checkbox (tasks only; no-op if vault missing)."""
+        if item.kind != "task":
+            return
+        if not self.available:
+            logger.debug(
+                "ObsidianTasksSink skipped: vault not found at %s", self._vault
+            )
+            return
+
+        target = self._target()
+        if target is None:
+            return
+
+        try:
+            existing = target.read_text(encoding="utf-8") if target.exists() else ""
+        except OSError:
+            logger.warning("ObsidianTasksSink: could not read %s", target)
+            existing = ""
+
+        if self._dedupe and self._already_present(existing, item.title):
+            return
+
+        line = self._format(item)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(target, "a", encoding="utf-8") as fh:
+                if existing and not existing.endswith("\n"):
+                    fh.write("\n")
+                fh.write(line + "\n")
+        except OSError:
+            logger.warning("ObsidianTasksSink: could not write %s", target)
+
+    @staticmethod
+    def _format(item: ExtractedItem) -> str:
+        """Render an item as an Obsidian task line."""
+        line = f"- [ ] {item.title}"
+        date = _date_only(item.due)
+        if date:
+            line += f" 📅 {date}"
+        return line
+
+    @staticmethod
+    def _already_present(existing: str, title: str) -> bool:
+        """True when an open checkbox with the same title already exists."""
+        want = title.strip().lower()
+        for raw in existing.splitlines():
+            m = _OPEN_CHECKBOX_RE.match(raw)
+            if not m:
+                continue
+            text = _DUE_MARKER_RE.sub("", m.group(1)).strip().lower()
+            if text == want:
+                return True
+        return False
+
+
+def _date_only(due: Optional[str]) -> Optional[str]:
+    """Return the ``YYYY-MM-DD`` portion of a due string, or None."""
+    dt = _parse_due(due)
+    return dt.strftime("%Y-%m-%d") if dt is not None else None
+
+
+def combine_sinks(*sinks: Optional[Sink]) -> Optional[Sink]:
+    """Combine several sinks into one that fans out to each.
+
+    ``None`` entries are dropped.  Each sink is guarded independently so one
+    failing sink does not prevent the others from running.  Returns ``None``
+    when no sinks remain, or the single sink when only one is given.
+    """
+    active = [s for s in sinks if s is not None]
+    if not active:
+        return None
+    if len(active) == 1:
+        return active[0]
+
+    def _fan_out(item: ExtractedItem) -> None:
+        for sink in active:
+            try:
+                sink(item)
+            except Exception:
+                logger.exception("combine_sinks: a sink failed")
+
+    return _fan_out
+
+
+__all__ = [
+    "AppleRemindersSink",
+    "ObsidianTasksSink",
+    "combine_sinks",
+]

@@ -152,6 +152,8 @@ class TestChannelConnectExtraction:
         assert result.exit_code == 0
         assert "--extract-tasks" in result.output
         assert "--to-reminders" in result.output
+        assert "--to-obsidian" in result.output
+        assert "--vault" in result.output
 
     def test_extract_without_engine_warns(self) -> None:
         config_p, getch_p, _ = _patch_channel(
