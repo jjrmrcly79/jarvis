@@ -350,6 +350,10 @@ def channel_connect(
         console.print(f"[red]Channel '{key}' does not support live connections.[/red]")
         return
 
+    # Surface first-run bridge setup (otherwise-silent npm install + build).
+    if hasattr(ch, "set_progress_handler"):
+        ch.set_progress_handler(lambda msg: console.print(f"[dim]{msg}[/dim]"))
+
     # Surface the pairing QR.  Bridge-based channels (e.g. whatsapp_baileys)
     # render a scannable ASCII QR to their subprocess stderr; forward it
     # verbatim so it stays scannable.

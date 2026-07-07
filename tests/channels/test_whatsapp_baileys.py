@@ -406,6 +406,25 @@ class TestStderrLoop:
         ch._stderr_loop()
 
 
+class TestProgressHandler:
+    def test_progress_forwarded_to_handler(self):
+        ch = WhatsAppBaileysChannel()
+        received = []
+        ch.set_progress_handler(received.append)
+        ch._progress("Installing…")
+        assert received == ["Installing…"]
+
+    def test_progress_falls_back_to_log_without_handler(self):
+        ch = WhatsAppBaileysChannel()
+        # No handler set -> must not raise.
+        ch._progress("Building…")
+
+    def test_progress_handler_exception_does_not_crash(self):
+        ch = WhatsAppBaileysChannel()
+        ch.set_progress_handler(MagicMock(side_effect=ValueError("boom")))
+        ch._progress("Building…")
+
+
 # ---------------------------------------------------------------------------
 # _ensure_bridge reuse of an existing build
 # ---------------------------------------------------------------------------

@@ -83,6 +83,7 @@ class WhatsAppBaileysChannel(BaseChannel):
         self._handlers: List[ChannelHandler] = []
         self._qr_handlers: List[QRHandler] = []
         self._stderr_handler: Optional[StderrHandler] = None
+        self._progress_handler: Optional[StderrHandler] = None
         self._status = ChannelStatus.DISCONNECTED
         self._process: Optional[subprocess.Popen] = None
         self._reader_thread: Optional[threading.Thread] = None
@@ -110,7 +111,7 @@ class WhatsAppBaileysChannel(BaseChannel):
         if shutil.which("node") is None:
             raise RuntimeError(
                 "Node.js is required for WhatsAppBaileysChannel but 'node' "
-                "was not found on PATH.  Install Node.js 22+ and try again."
+                "was not found on PATH.  Install Node.js 18+ and try again."
             )
 
         runtime = self._runtime_dir
@@ -163,17 +164,27 @@ class WhatsAppBaileysChannel(BaseChannel):
             if not needs_build:
                 install_cmd.append("--production")
             logger.info("Running %s in %s", " ".join(install_cmd), runtime)
-            self._run_npm(install_cmd, runtime, "npm install")
+            self._progress(
+                "Installing WhatsApp bridge dependencies (first run, "
+                "this can take 1-2 min)…"
+            )
+            self._run_npm(install_cmd, runtime, "npm install", timeout=600.0)
         elif needs_build and not tsc_bin.exists():
             # A previous production-only install lacks the TypeScript compiler
             # needed to rebuild; install the full dependency tree.
             logger.info("Installing dev dependencies for rebuild in %s", runtime)
-            self._run_npm(["npm", "install"], runtime, "npm install")
+            self._progress("Installing WhatsApp bridge build tools…")
+            self._run_npm(["npm", "install"], runtime, "npm install", timeout=600.0)
 
         # Compile the TypeScript bridge if no dist/bridge.js exists yet.
         if needs_build:
             logger.info("Building WhatsApp bridge (tsc) in %s", runtime)
-            self._run_npm(["npm", "run", "build"], runtime, "npm run build")
+            self._progress("Compiling WhatsApp bridge…")
+            self._run_npm(
+                ["npm", "run", "build"], runtime, "npm run build", timeout=300.0
+            )
+
+        self._progress("WhatsApp bridge ready — connecting…")
 
         if not bridge_js.exists():
             raise RuntimeError(
@@ -182,8 +193,28 @@ class WhatsAppBaileysChannel(BaseChannel):
             )
         return bridge_js
 
+    def _progress(self, message: str) -> None:
+        """Report a setup-progress message to the handler (or the log)."""
+        if self._progress_handler is not None:
+            try:
+                self._progress_handler(message)
+                return
+            except Exception:
+                logger.debug("progress handler error", exc_info=True)
+        logger.info("%s", message)
+
+    def set_progress_handler(self, handler: Optional[StderrHandler]) -> None:
+        """Route bridge setup-progress messages (install/build) to *handler*.
+
+        Lets a foreground CLI surface the otherwise-silent first-run npm
+        install and TypeScript build.  Pass ``None`` to restore logging.
+        """
+        self._progress_handler = handler
+
     @staticmethod
-    def _run_npm(cmd: List[str], cwd: Path, label: str) -> None:
+    def _run_npm(
+        cmd: List[str], cwd: Path, label: str, *, timeout: float = 600.0
+    ) -> None:
         """Run an npm command, raising a helpful RuntimeError on failure."""
         try:
             subprocess.run(
@@ -192,11 +223,18 @@ class WhatsAppBaileysChannel(BaseChannel):
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=timeout,
             )
         except FileNotFoundError as exc:
             raise RuntimeError(
-                "npm was not found on PATH.  Install Node.js 22+ (which "
+                "npm was not found on PATH.  Install Node.js 18+ (which "
                 "includes npm) and try again."
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"{label} timed out after {int(timeout)}s.  Check your network "
+                f"connection and that npm works, then retry.  You can also run "
+                f"it manually in {cwd}."
             ) from exc
         except subprocess.CalledProcessError as exc:
             stderr = (exc.stderr or "").strip()
