@@ -231,6 +231,41 @@ The pairing state is saved under `~/.openjarvis/whatsapp_baileys_bridge/auth/`,
 so subsequent connects reconnect automatically without a new QR scan. The
 Node.js bridge is built on first use (requires Node.js 22+ on `PATH`).
 
+### Extracting Tasks & Meetings from Incoming Messages
+
+Most to-dos and meetings arrive as chat messages. Add `--extract-tasks` to run
+each incoming message through the LLM and detect actionable **tasks** and
+**meetings**, which are appended to `~/.openjarvis/extracted_tasks.jsonl`:
+
+```bash
+jarvis channel connect --channel-type whatsapp_baileys --extract-tasks
+```
+
+On macOS, add `--to-reminders` to also create entries in **Reminders.app** (in
+the `WhatsApp` list by default, configurable with `--reminders-list`), where the
+HUD's agenda/reminders panels pick them up automatically:
+
+```bash
+jarvis channel connect --channel-type whatsapp_baileys --to-reminders
+```
+
+Extraction uses the same engine/model resolution as `jarvis ask` (start Ollama
+or set a cloud API key). Relative dates like "mañana" or "el viernes" are
+resolved against the current date, and titles are kept in the message's original
+language.
+
+Review what has been extracted at any time:
+
+```bash
+jarvis channel inbox                 # most recent items
+jarvis channel inbox --kind meeting  # meetings only
+```
+
+Programmatically, the same pipeline is available via
+`openjarvis.channels.task_extraction.MessageTaskExtractor` (portable, JSONL
+store) with an optional `sink` callback for custom delivery; the bundled
+`openjarvis.channels.task_sinks.AppleRemindersSink` targets macOS Reminders.
+
 ---
 
 ## API Server Endpoints

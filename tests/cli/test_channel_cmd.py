@@ -100,9 +100,7 @@ class TestChannelConnect:
             status_return=ChannelStatus.CONNECTED,
         )
         # Stop the listen loop on the first sleep so the test terminates.
-        sleep_p = mock.patch(
-            "time.sleep", side_effect=KeyboardInterrupt
-        )
+        sleep_p = mock.patch("time.sleep", side_effect=KeyboardInterrupt)
         with config_p, getch_p, sleep_p:
             result = CliRunner().invoke(
                 cli,
@@ -135,9 +133,7 @@ class TestChannelConnect:
         cfg.channel.default_channel = ""
         # A channel object that lacks on_message is not a live channel.
         limited = mock.MagicMock(spec=["connect", "status", "disconnect"])
-        config_p = mock.patch(
-            "openjarvis.core.config.load_config", return_value=cfg
-        )
+        config_p = mock.patch("openjarvis.core.config.load_config", return_value=cfg)
         getch_p = mock.patch(
             "openjarvis.cli.channel_cmd._get_channel", return_value=limited
         )
@@ -148,6 +144,113 @@ class TestChannelConnect:
         assert result.exit_code == 0
         assert "does not support live connections" in result.output
         limited.connect.assert_not_called()
+
+
+class TestChannelConnectExtraction:
+    def test_connect_flags_in_help(self) -> None:
+        result = CliRunner().invoke(cli, ["channel", "connect", "--help"])
+        assert result.exit_code == 0
+        assert "--extract-tasks" in result.output
+        assert "--to-reminders" in result.output
+
+    def test_extract_without_engine_warns(self) -> None:
+        config_p, getch_p, _ = _patch_channel(
+            status_return=ChannelStatus.CONNECTED,
+        )
+        resolve_p = mock.patch(
+            "openjarvis.cli.channel_cmd._resolve_engine_model",
+            return_value=None,
+        )
+        sleep_p = mock.patch("time.sleep", side_effect=KeyboardInterrupt)
+        with config_p, getch_p, resolve_p, sleep_p:
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "channel",
+                    "connect",
+                    "--channel-type",
+                    "whatsapp_baileys",
+                    "--extract-tasks",
+                ],
+            )
+        assert result.exit_code == 0
+        assert "no inference engine" in result.output.lower()
+
+    def test_extract_with_engine_announces(self) -> None:
+        config_p, getch_p, _ = _patch_channel(
+            status_return=ChannelStatus.CONNECTED,
+        )
+        resolve_p = mock.patch(
+            "openjarvis.cli.channel_cmd._resolve_engine_model",
+            return_value=(mock.MagicMock(), "test-model"),
+        )
+        sleep_p = mock.patch("time.sleep", side_effect=KeyboardInterrupt)
+        with config_p, getch_p, resolve_p, sleep_p:
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "channel",
+                    "connect",
+                    "--channel-type",
+                    "whatsapp_baileys",
+                    "--extract-tasks",
+                ],
+            )
+        assert result.exit_code == 0
+        assert "Task extraction on" in result.output
+        assert "test-model" in result.output
+
+
+class TestChannelInbox:
+    def test_inbox_empty(self) -> None:
+        with mock.patch(
+            "openjarvis.channels.task_extraction.load_items", return_value=[]
+        ):
+            result = CliRunner().invoke(cli, ["channel", "inbox"])
+        assert result.exit_code == 0
+        assert "No extracted items" in result.output
+
+    def test_inbox_lists_items(self) -> None:
+        from openjarvis.channels.task_extraction import ExtractedItem
+
+        items = [
+            ExtractedItem(
+                kind="task",
+                title="Pagar renta",
+                due="2026-07-08",
+                source_sender="Casero",
+                created_at="2026-07-07T12:00:00",
+            ),
+            ExtractedItem(
+                kind="meeting",
+                title="Junta con Ana",
+                due="2026-07-10T10:00",
+                source_sender="Ana",
+                created_at="2026-07-07T12:05:00",
+            ),
+        ]
+        with mock.patch(
+            "openjarvis.channels.task_extraction.load_items", return_value=items
+        ):
+            result = CliRunner().invoke(cli, ["channel", "inbox"])
+        assert result.exit_code == 0
+        assert "Pagar renta" in result.output
+        assert "Junta con Ana" in result.output
+
+    def test_inbox_filter_kind(self) -> None:
+        from openjarvis.channels.task_extraction import ExtractedItem
+
+        items = [
+            ExtractedItem(kind="task", title="Tarea A"),
+            ExtractedItem(kind="meeting", title="Reunion B"),
+        ]
+        with mock.patch(
+            "openjarvis.channels.task_extraction.load_items", return_value=items
+        ):
+            result = CliRunner().invoke(cli, ["channel", "inbox", "--kind", "meeting"])
+        assert result.exit_code == 0
+        assert "Reunion B" in result.output
+        assert "Tarea A" not in result.output
 
 
 class TestChannelStatus:

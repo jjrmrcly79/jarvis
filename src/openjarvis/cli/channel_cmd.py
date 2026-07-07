@@ -232,14 +232,62 @@ def channel_send(
         )
 
 
+def _resolve_engine_model(config: Any) -> Any:
+    """Resolve an ``(engine, model)`` pair from config for task extraction.
+
+    Mirrors the resolution chain used by ``jarvis ask``.  Returns ``None`` when
+    no engine is reachable or no model can be determined.
+    """
+    from openjarvis.engine import discover_engines, discover_models, get_engine
+    from openjarvis.intelligence import register_builtin_models
+
+    register_builtin_models()
+
+    resolved = get_engine(config, config.intelligence.preferred_engine or None)
+    if resolved is None:
+        return None
+    engine_name, engine = resolved
+
+    all_models = discover_models(discover_engines(config))
+    model_name = config.intelligence.default_model
+    if not model_name:
+        engine_models = all_models.get(engine_name, [])
+        model_name = engine_models[0] if engine_models else ""
+    if not model_name:
+        model_name = config.intelligence.fallback_model
+    if not model_name:
+        return None
+    return engine, model_name
+
+
 @channel.command("connect")
 @click.option(
     "--channel-type",
     default=None,
     help=_CHANNEL_TYPE_HELP,
 )
+@click.option(
+    "--extract-tasks/--no-extract-tasks",
+    default=False,
+    help="Extract tasks/meetings from incoming messages with the LLM and save "
+    "them to ~/.openjarvis/extracted_tasks.jsonl.",
+)
+@click.option(
+    "--to-reminders/--no-to-reminders",
+    default=False,
+    help="Also create macOS Reminders for extracted items (implies "
+    "--extract-tasks; no-op off macOS).",
+)
+@click.option(
+    "--reminders-list",
+    default="WhatsApp",
+    help="Reminders.app list for --to-reminders (default: WhatsApp).",
+)
 def channel_connect(
     channel_type: Optional[str],
+    extract_tasks: bool,
+    to_reminders: bool,
+    reminders_list: str,
 ) -> None:
     """Connect a live channel and stream incoming messages.
 
@@ -247,9 +295,14 @@ def channel_connect(
     personal WhatsApp account by QR code), prints the QR to scan, and then
     prints each incoming message until interrupted with Ctrl+C.
 
+    With ``--extract-tasks`` each incoming message is run through the LLM to
+    detect actionable tasks and meetings, which are saved for later review
+    (see ``jarvis channel inbox``).  Add ``--to-reminders`` on macOS to also
+    push them into Reminders.app, where the HUD picks them up.
+
     Example::
 
-        jarvis channel connect --channel-type whatsapp_baileys
+        jarvis channel connect --channel-type whatsapp_baileys --to-reminders
     """
     import time
 
@@ -287,10 +340,53 @@ def channel_connect(
             )
         )
 
+    # Build the task/meeting extractor when requested.
+    extractor = None
+    if extract_tasks or to_reminders:
+        resolved = _resolve_engine_model(config)
+        if resolved is None:
+            console.print(
+                "[yellow]Task extraction requested but no inference engine/model "
+                "is available — streaming messages only. Start Ollama or set a "
+                "cloud API key.[/yellow]"
+            )
+        else:
+            engine, model = resolved
+            sink = None
+            if to_reminders:
+                from openjarvis.channels.task_sinks import AppleRemindersSink
+
+                sink = AppleRemindersSink(list_name=reminders_list)
+                if not sink.available:
+                    console.print(
+                        "[yellow]--to-reminders is macOS-only; extracted items "
+                        "will be saved but not pushed to Reminders.app.[/yellow]"
+                    )
+            from openjarvis.channels.task_extraction import (
+                MessageTaskExtractor,
+                default_store_path,
+            )
+
+            extractor = MessageTaskExtractor(engine, model=model, sink=sink)
+            console.print(
+                f"[cyan]Task extraction on[/cyan] (model: {model}) → "
+                f"{default_store_path()}"
+            )
+
     def _on_message(msg: Any) -> None:
         sender = getattr(msg, "sender", "") or getattr(msg, "conversation_id", "")
         content = getattr(msg, "content", "")
         console.print(f"[green]{sender}[/green]: {content}")
+        if extractor is not None:
+            try:
+                items = extractor.process(msg)
+            except Exception as exc:  # noqa: BLE001
+                console.print(f"[red]  extraction failed: {exc}[/red]")
+                return
+            for it in items:
+                due = f" [dim](vence {it.due})[/dim]" if it.due else ""
+                icon = "📅" if it.kind == "meeting" else "✅"
+                console.print(f"  {icon} [bold]{it.title}[/bold]{due}")
 
     ch.on_message(_on_message)
 
@@ -356,3 +452,58 @@ def channel_status(
     key = channel_type or config.channel.default_channel or "unknown"
     console.print(f"Channel: [cyan]{key}[/cyan]")
     console.print(f"Status: [{color}]{st.value}[/{color}]")
+
+
+@channel.command("inbox")
+@click.option(
+    "--limit",
+    default=20,
+    show_default=True,
+    help="Maximum number of most-recent items to show.",
+)
+@click.option(
+    "--kind",
+    type=click.Choice(["all", "task", "meeting"]),
+    default="all",
+    show_default=True,
+    help="Filter by item kind.",
+)
+def channel_inbox(limit: int, kind: str) -> None:
+    """List tasks/meetings extracted from incoming messages.
+
+    Reads ``~/.openjarvis/extracted_tasks.jsonl`` populated by
+    ``jarvis channel connect --extract-tasks``.
+    """
+    console = Console()
+    from openjarvis.channels.task_extraction import default_store_path, load_items
+
+    items = load_items()
+    if kind != "all":
+        items = [it for it in items if it.kind == kind]
+
+    if not items:
+        console.print(
+            "[yellow]No extracted items yet.[/yellow]\n"
+            "[dim]Populate with: jarvis channel connect "
+            "--channel-type whatsapp_baileys --extract-tasks[/dim]"
+        )
+        return
+
+    items = items[-limit:][::-1]  # most recent first
+
+    table = Table(title=f"Extracted items ({default_store_path()})")
+    table.add_column("Kind", style="magenta")
+    table.add_column("Title", style="bold")
+    table.add_column("Due", style="cyan")
+    table.add_column("From", style="green")
+    table.add_column("Extracted", style="dim")
+    for it in items:
+        icon = "📅 meeting" if it.kind == "meeting" else "✅ task"
+        table.add_row(
+            icon,
+            it.title,
+            it.due or "—",
+            it.source_sender or "—",
+            (it.created_at or "")[:16].replace("T", " "),
+        )
+    console.print(table)
