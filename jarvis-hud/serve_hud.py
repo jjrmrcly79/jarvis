@@ -742,6 +742,53 @@ def knowledge_context(query: str, limit: int = 6, per_chars: int = 600):
             f"Responde usando SOLO esto y cita de qué nota sale:\n" + "\n".join(lines))
 
 
+# ---------- Panel 🧠 Memoria del HUD (log del día + diario + búsqueda) ----------
+def memory_today_data():
+    """Resumen del día para el panel Memoria: intercambios, notas archivadas,
+    acciones, briefs enviados y compromisos abiertos del diario."""
+    import chat_memory as cm   # módulo hermano (jarvis-hud/)
+    events = cm.read_day()
+    chats = sum(1 for e in events if e.get("kind") == "chat")
+    notas = [{"hora": e.get("ts", "")[11:16], "area": e.get("area", ""),
+              "title": e.get("title") or "Inbox"}
+             for e in events if e.get("kind") == "nota"]
+    acciones = [{"hora": e.get("ts", "")[11:16], "detalle": e.get("detalle", "")}
+                for e in events if e.get("kind") == "accion"]
+    briefs = [e.get("tipo", "") for e in events if e.get("kind") == "brief"]
+    diary = cm.DIARY_DIR / (date.today().isoformat() + ".md")
+    compromisos, diario_rel = [], None
+    if diary.exists():
+        try:
+            diario_rel = str(diary.relative_to(cm.VAULT))
+        except Exception:
+            diario_rel = diary.name
+        in_comp = False
+        try:
+            for ln in diary.read_text(encoding="utf-8").splitlines():
+                if ln.startswith("## "):
+                    in_comp = ln.startswith("## Compromisos")
+                    continue
+                if in_comp and ln.strip().startswith("- [ ]"):
+                    compromisos.append(ln.strip()[5:].strip())
+        except OSError:
+            pass
+    return {"chats": chats, "notas": notas, "acciones": acciones,
+            "briefs": briefs, "compromisos": compromisos, "diario": diario_rel}
+
+
+def unified_search(query: str, days: int = 180):
+    """Búsqueda unificada para el HUD: correo histórico + notas del vault."""
+    try:
+        mail = mail_search_context(query, days=days, limit=8)
+    except Exception:
+        mail = None
+    try:
+        notas = knowledge_context(query, limit=6)
+    except Exception:
+        notas = None
+    return {"query": query, "mail": mail or "", "notas": notas or ""}
+
+
 # ---------- Recordatorios de Mac (Reminders.app, lectura + escritura) ----------
 _REM_READ_SCRIPT = '''on run
   set out to ""
@@ -1478,6 +1525,26 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._send_json({"ok": False, "error": str(e)}, 500)
 
+    def _serve_memory(self):
+        try:
+            self._send_json(memory_today_data())
+        except Exception as e:
+            self._send_json({"chats": 0, "notas": [], "acciones": [],
+                             "briefs": [], "compromisos": [], "diario": None,
+                             "error": str(e)}, 500)
+
+    def _serve_search(self):
+        try:
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            q = (qs.get("q", [""])[0] or "").strip()
+            if not q:
+                self._send_json({"query": "", "mail": "", "notas": ""}, 400)
+                return
+            self._send_json(unified_search(q))
+        except Exception as e:
+            self._send_json({"query": "", "mail": "", "notas": "",
+                             "error": str(e)}, 500)
+
     def do_GET(self):
         if self.path.startswith("/calendar"):
             self._serve_calendar()
@@ -1497,6 +1564,10 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_reminders()
         elif self.path.startswith("/mail"):
             self._serve_mail()
+        elif self.path.startswith("/memory"):
+            self._serve_memory()
+        elif self.path.startswith("/search"):
+            self._serve_search()
         elif self.path.startswith("/tts"):
             self._serve_tts()
         elif self._is_proxy():

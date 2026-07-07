@@ -233,6 +233,13 @@ plegable. Se corre solo a las 21:00 (dentro del cierre) o con `/diario`.
   incremental) para que la búsqueda «¿qué sé de X?» (memory.db FTS) esté
   fresca cada día. Antepone `~/.local/bin` al PATH porque `sync_vault`
   llama a `uv` y el PATH de launchd no lo trae.
+
+**HUD (`:8090`):** el dash tiene sección **🧠 Memoria** (intercambios/notas/
+acciones/briefs del día + compromisos abiertos del diario; `GET /memory`) y
+**🔎 buscador unificado** correo histórico + notas del vault (`GET /search?q=`,
+Enter para buscar). El refresh de 3 min no toca el input del usuario.
+Tras editar `serve_hud.py` o `index.html`: `launchctl kickstart -k
+gui/$(id -u)/com.openjarvis.hud` y validar el `<script>` con `node --check`.
 - Si el LLM falla, el brief sale con los datos crudos (nunca se queda callado).
 - `/brief` lo dispara a demanda.
 
