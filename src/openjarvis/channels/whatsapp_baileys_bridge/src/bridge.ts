@@ -32,6 +32,13 @@ function emit(event: Record<string, unknown>): void {
   process.stdout.write(JSON.stringify(event) + "\n");
 }
 
+// Normalise a JID to its bare identifier (drop the device suffix ":12" and the
+// server part "@…"), so "5215551234567:12@s.whatsapp.net" -> "5215551234567".
+function bareJid(jid: string | undefined | null): string {
+  if (!jid) return "";
+  return jid.split("@")[0].split(":")[0];
+}
+
 // Minimal pino-compatible no-op logger.  Keeps Baileys' internal chatter off
 // stderr so the only thing written there is the scannable QR code, which the
 // Python side forwards to the user's terminal during pairing.
@@ -87,6 +94,13 @@ async function main(): Promise<void> {
   // failure (e.g. blocked network) surfaces an error instead of looping.
   let failStreak = 0;
   const MAX_ATTEMPTS = 6;
+
+  // True when *jid* is our own "Message Yourself" chat, i.e. the message was
+  // sent by us to ourselves. Used to let self-notes through the fromMe filter.
+  function isSelfChat(jid: string): boolean {
+    const me = bareJid(sock?.user?.id);
+    return me !== "" && bareJid(jid) === me;
+  }
 
   function startSocket(attempt: number): void {
     // Alternate between the fetched WA Web version and Baileys' bundled
@@ -150,7 +164,16 @@ async function main(): Promise<void> {
 
     sock.ev.on("messages.upsert", (m) => {
       for (const msg of m.messages) {
-        if (!msg.message || msg.key.fromMe) continue;
+        if (!msg.message) continue;
+
+        const remoteJid = msg.key.remoteJid || "";
+        if (msg.key.fromMe) {
+          // Skip our own outgoing chatter to others, but DO process notes we
+          // send to ourselves (the "Message Yourself" chat), so WhatsApp can be
+          // used as a personal task inbox.
+          if (!isSelfChat(remoteJid)) continue;
+        }
+
         const text =
           msg.message.conversation ||
           msg.message.extendedTextMessage?.text ||
@@ -159,8 +182,8 @@ async function main(): Promise<void> {
 
         emit({
           type: "message",
-          jid: msg.key.remoteJid || "",
-          sender: msg.key.participant || msg.key.remoteJid || "",
+          jid: remoteJid,
+          sender: msg.key.participant || remoteJid,
           text,
           message_id: msg.key.id || "",
         });
