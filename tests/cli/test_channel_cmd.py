@@ -202,6 +202,32 @@ class TestChannelConnectExtraction:
         assert "Task extraction on" in result.output
         assert "test-model" in result.output
 
+    def test_model_override_announced(self) -> None:
+        config_p, getch_p, _ = _patch_channel(
+            status_return=ChannelStatus.CONNECTED,
+        )
+        resolve_p = mock.patch(
+            "openjarvis.cli.channel_cmd._resolve_engine_model",
+            return_value=(mock.MagicMock(), "default-model"),
+        )
+        sleep_p = mock.patch("time.sleep", side_effect=KeyboardInterrupt)
+        with config_p, getch_p, resolve_p, sleep_p:
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "channel",
+                    "connect",
+                    "--channel-type",
+                    "whatsapp_baileys",
+                    "--extract-tasks",
+                    "--model",
+                    "qwen3:8b",
+                ],
+            )
+        assert result.exit_code == 0
+        assert "qwen3:8b" in result.output
+        assert "default-model" not in result.output
+
 
 class TestChannelInbox:
     def test_inbox_empty(self) -> None:
@@ -289,6 +315,33 @@ class TestServiceHelpers:
         )
         assert "--extract-tasks" in args
         assert "--to-reminders" not in args
+
+    def test_connect_args_with_model(self) -> None:
+        from openjarvis.cli.channel_cmd import _service_connect_args
+
+        args = _service_connect_args(
+            "whatsapp_baileys",
+            extract_tasks=True,
+            to_reminders=True,
+            to_obsidian=True,
+            reminders_list="WhatsApp",
+            obsidian_note="Bandeja de WhatsApp.md",
+            model="qwen3:8b",
+        )
+        assert "--model" in args and "qwen3:8b" in args
+
+    def test_connect_args_no_model_by_default(self) -> None:
+        from openjarvis.cli.channel_cmd import _service_connect_args
+
+        args = _service_connect_args(
+            "whatsapp_baileys",
+            extract_tasks=True,
+            to_reminders=True,
+            to_obsidian=True,
+            reminders_list="WhatsApp",
+            obsidian_note="Bandeja de WhatsApp.md",
+        )
+        assert "--model" not in args
 
     def test_connect_args_custom_note_and_list(self) -> None:
         from openjarvis.cli.channel_cmd import _service_connect_args

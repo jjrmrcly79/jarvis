@@ -300,6 +300,12 @@ def _resolve_engine_model(config: Any) -> Any:
     help="Obsidian vault path for --to-obsidian (falls back to $VAULT, then "
     "the standard iCloud location).",
 )
+@click.option(
+    "--model",
+    default="",
+    help="Model to use for task extraction (e.g. qwen3:8b for speed). "
+    "Defaults to the configured default model.",
+)
 def channel_connect(
     channel_type: Optional[str],
     extract_tasks: bool,
@@ -308,6 +314,7 @@ def channel_connect(
     to_obsidian: bool,
     obsidian_note: str,
     vault: str,
+    model: str,
 ) -> None:
     """Connect a live channel and stream incoming messages.
 
@@ -378,7 +385,8 @@ def channel_connect(
                 "cloud API key.[/yellow]"
             )
         else:
-            engine, model = resolved
+            engine, resolved_model = resolved
+            model_to_use = model or resolved_model
             from openjarvis.channels.task_sinks import combine_sinks
 
             sinks = []
@@ -413,10 +421,10 @@ def channel_connect(
             )
 
             extractor = MessageTaskExtractor(
-                engine, model=model, sink=combine_sinks(*sinks)
+                engine, model=model_to_use, sink=combine_sinks(*sinks)
             )
             console.print(
-                f"[cyan]Task extraction on[/cyan] (model: {model}) → "
+                f"[cyan]Task extraction on[/cyan] (model: {model_to_use}) → "
                 f"{default_store_path()}"
             )
 
@@ -584,6 +592,7 @@ def _service_connect_args(
     to_obsidian: bool,
     reminders_list: str,
     obsidian_note: str,
+    model: str = "",
 ) -> list:
     """Build the ``jarvis`` argv the service should run on each launch."""
     args = ["channel", "connect", "--channel-type", channel_type]
@@ -597,6 +606,8 @@ def _service_connect_args(
         args += ["--reminders-list", reminders_list]
     if obsidian_note and obsidian_note != "Bandeja de WhatsApp.md":
         args += ["--obsidian-note", obsidian_note]
+    if model:
+        args += ["--model", model]
     return args
 
 
@@ -644,6 +655,11 @@ def _service_wrapper_script(
     default="",
     help="Obsidian vault path baked into the service (falls back to $VAULT).",
 )
+@click.option(
+    "--model",
+    default="",
+    help="Model for task extraction (e.g. qwen3:8b for speed).",
+)
 def channel_service(
     action: str,
     channel_type: str,
@@ -653,6 +669,7 @@ def channel_service(
     reminders_list: str,
     obsidian_note: str,
     vault: str,
+    model: str,
 ) -> None:
     """Install/uninstall an always-on background service (macOS).
 
@@ -744,6 +761,7 @@ def channel_service(
         to_obsidian=to_obsidian,
         reminders_list=reminders_list,
         obsidian_note=obsidian_note,
+        model=model,
     )
     wrapper_body = _service_wrapper_script(repo, vault_resolved, args, path_dirs)
 
