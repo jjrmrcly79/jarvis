@@ -600,11 +600,16 @@ def _service_connect_args(
     return args
 
 
-def _service_wrapper_script(repo: str, vault: str, args: list) -> str:
+def _service_wrapper_script(
+    repo: str, vault: str, args: list, path_dirs: Optional[list] = None
+) -> str:
     """Render the zsh wrapper the LaunchAgent executes.
 
-    Sources the user's login profile so ``uv``/``node`` are on PATH, exports
-    VAULT, and re-runs ``uv run jarvis channel connect …`` in the repo.
+    Sources the user's login profile, then prepends *path_dirs* (the resolved
+    locations of ``node``/``npm``/``uv`` detected at install time) to PATH so
+    the background service finds them even when ``~/.zshrc`` bails out early for
+    non-interactive shells (a very common ``[[ $- != *i* ]] && return`` guard).
+    Exports VAULT and re-runs ``uv run jarvis channel connect …`` in the repo.
     """
     import shlex
 
@@ -613,6 +618,9 @@ def _service_wrapper_script(repo: str, vault: str, args: list) -> str:
         '[ -f "$HOME/.zprofile" ] && source "$HOME/.zprofile"',
         '[ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc"',
     ]
+    if path_dirs:
+        prefix = ":".join(path_dirs)
+        lines.append(f'export PATH="{prefix}:$PATH"')
     if vault:
         lines.append(f"export VAULT={shlex.quote(vault)}")
     lines.append(f"cd {shlex.quote(repo)} || exit 1")
@@ -701,6 +709,7 @@ def channel_service(
 
     # action == "install"
     import plistlib
+    import shutil
     import stat
 
     repo = os.getcwd()
@@ -708,6 +717,23 @@ def channel_service(
         console.print(
             f"[yellow]Note:[/yellow] installing with repo dir = {repo}. "
             "Run this from your OpenJarvis checkout if that looks wrong."
+        )
+
+    # Detect where node/npm/uv live now (interactive PATH) and bake those dirs
+    # into the wrapper — launchd starts with a minimal PATH and ~/.zshrc often
+    # bails out for non-interactive shells, so the service can't find them.
+    path_dirs: list = []
+    for tool in ("node", "npm", "uv"):
+        found = shutil.which(tool)
+        if found:
+            d = os.path.dirname(found)
+            if d and d not in path_dirs:
+                path_dirs.append(d)
+    if not shutil.which("node"):
+        console.print(
+            "[yellow]Warning:[/yellow] 'node' was not found on your PATH now. "
+            "The WhatsApp bridge needs Node.js 18+; install it before the "
+            "service can connect."
         )
 
     vault_resolved = vault or os.environ.get("VAULT", "")
@@ -719,7 +745,7 @@ def channel_service(
         reminders_list=reminders_list,
         obsidian_note=obsidian_note,
     )
-    wrapper_body = _service_wrapper_script(repo, vault_resolved, args)
+    wrapper_body = _service_wrapper_script(repo, vault_resolved, args, path_dirs)
 
     paths["wrapper"].parent.mkdir(parents=True, exist_ok=True)
     plist.parent.mkdir(parents=True, exist_ok=True)

@@ -327,6 +327,23 @@ class TestServiceHelpers:
         body = _service_wrapper_script("/repo", "", ["channel", "connect"])
         assert "export VAULT" not in body
 
+    def test_wrapper_prepends_path_dirs(self) -> None:
+        from openjarvis.cli.channel_cmd import _service_wrapper_script
+
+        body = _service_wrapper_script(
+            "/repo",
+            "",
+            ["channel", "connect"],
+            ["/opt/homebrew/bin", "/Users/j/.local/bin"],
+        )
+        assert 'export PATH="/opt/homebrew/bin:/Users/j/.local/bin:$PATH"' in body
+
+    def test_wrapper_no_path_line_without_dirs(self) -> None:
+        from openjarvis.cli.channel_cmd import _service_wrapper_script
+
+        body = _service_wrapper_script("/repo", "", ["channel", "connect"])
+        assert "export PATH" not in body
+
 
 class TestChannelStatus:
     def test_status_shows_info(self) -> None:
