@@ -273,6 +273,25 @@ jarvis channel inbox                 # most recent items
 jarvis channel inbox --kind meeting  # meetings only
 ```
 
+### Always-on background service (macOS)
+
+To keep the listener running without a terminal — starting at login and
+restarting on failure — install it as a launchd service. Run this from your
+OpenJarvis checkout:
+
+```bash
+jarvis channel service install       # installs + starts (uses --to-reminders --to-obsidian by default)
+jarvis channel service status        # is it running?
+jarvis channel service uninstall     # remove it
+```
+
+`install` writes a launch agent (`~/Library/LaunchAgents/com.openjarvis.whatsapp.plist`)
+and a wrapper script, then loads it. Logs go to
+`~/.openjarvis/whatsapp-service.log`. Task extraction still needs an engine in
+the background (run Ollama, or put a cloud key like `ANTHROPIC_API_KEY` in your
+`~/.zshrc` so the service inherits it). Don't also run `channel connect`
+manually while the service is on — two listeners share one WhatsApp session.
+
 Programmatically, the same pipeline is available via
 `openjarvis.channels.task_extraction.MessageTaskExtractor` (portable, JSONL
 store) with an optional `sink` callback for custom delivery. Bundled sinks in

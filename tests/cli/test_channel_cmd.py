@@ -255,6 +255,79 @@ class TestChannelInbox:
         assert "Tarea A" not in result.output
 
 
+class TestServiceHelpers:
+    def test_connect_args_defaults(self) -> None:
+        from openjarvis.cli.channel_cmd import _service_connect_args
+
+        args = _service_connect_args(
+            "whatsapp_baileys",
+            extract_tasks=True,
+            to_reminders=True,
+            to_obsidian=True,
+            reminders_list="WhatsApp",
+            obsidian_note="Bandeja de WhatsApp.md",
+        )
+        assert args == [
+            "channel",
+            "connect",
+            "--channel-type",
+            "whatsapp_baileys",
+            "--to-reminders",
+            "--to-obsidian",
+        ]
+
+    def test_connect_args_extract_only(self) -> None:
+        from openjarvis.cli.channel_cmd import _service_connect_args
+
+        args = _service_connect_args(
+            "whatsapp_baileys",
+            extract_tasks=True,
+            to_reminders=False,
+            to_obsidian=False,
+            reminders_list="WhatsApp",
+            obsidian_note="Bandeja de WhatsApp.md",
+        )
+        assert "--extract-tasks" in args
+        assert "--to-reminders" not in args
+
+    def test_connect_args_custom_note_and_list(self) -> None:
+        from openjarvis.cli.channel_cmd import _service_connect_args
+
+        args = _service_connect_args(
+            "whatsapp_baileys",
+            extract_tasks=True,
+            to_reminders=True,
+            to_obsidian=True,
+            reminders_list="Trabajo",
+            obsidian_note="Inbox WA.md",
+        )
+        assert "--reminders-list" in args and "Trabajo" in args
+        assert "--obsidian-note" in args and "Inbox WA.md" in args
+
+    def test_wrapper_script_quotes_and_sources(self) -> None:
+        from openjarvis.cli.channel_cmd import _service_wrapper_script
+
+        body = _service_wrapper_script(
+            "/Users/juan/dev/Open Jarvis",  # space -> must be quoted
+            "/Users/juan/vault",
+            ["channel", "connect", "--channel-type", "whatsapp_baileys"],
+        )
+        assert body.startswith("#!/bin/zsh\n")
+        assert 'source "$HOME/.zprofile"' in body
+        assert "export VAULT=/Users/juan/vault" in body
+        # A path with a space must be shell-quoted.
+        assert "'/Users/juan/dev/Open Jarvis'" in body
+        assert body.rstrip().endswith(
+            "exec uv run jarvis channel connect --channel-type whatsapp_baileys"
+        )
+
+    def test_wrapper_omits_vault_when_empty(self) -> None:
+        from openjarvis.cli.channel_cmd import _service_wrapper_script
+
+        body = _service_wrapper_script("/repo", "", ["channel", "connect"])
+        assert "export VAULT" not in body
+
+
 class TestChannelStatus:
     def test_status_shows_info(self) -> None:
         config_p, getch_p, _ = _patch_channel(

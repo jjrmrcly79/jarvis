@@ -554,3 +554,214 @@ def channel_inbox(limit: int, kind: str) -> None:
             (it.created_at or "")[:16].replace("T", " "),
         )
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Background service (macOS launchd)
+# ---------------------------------------------------------------------------
+
+_SERVICE_LABEL = "com.openjarvis.whatsapp"
+
+
+def _service_paths() -> Dict[str, Any]:
+    """Resolve the wrapper/plist/log paths for the background service."""
+    from pathlib import Path
+
+    home = Path.home()
+    return {
+        "label": _SERVICE_LABEL,
+        "wrapper": home / ".openjarvis" / "whatsapp-service.sh",
+        "plist": home / "Library" / "LaunchAgents" / f"{_SERVICE_LABEL}.plist",
+        "log": home / ".openjarvis" / "whatsapp-service.log",
+    }
+
+
+def _service_connect_args(
+    channel_type: str,
+    *,
+    extract_tasks: bool,
+    to_reminders: bool,
+    to_obsidian: bool,
+    reminders_list: str,
+    obsidian_note: str,
+) -> list:
+    """Build the ``jarvis`` argv the service should run on each launch."""
+    args = ["channel", "connect", "--channel-type", channel_type]
+    if to_reminders:
+        args.append("--to-reminders")
+    if to_obsidian:
+        args.append("--to-obsidian")
+    if extract_tasks and not (to_reminders or to_obsidian):
+        args.append("--extract-tasks")
+    if reminders_list and reminders_list != "WhatsApp":
+        args += ["--reminders-list", reminders_list]
+    if obsidian_note and obsidian_note != "Bandeja de WhatsApp.md":
+        args += ["--obsidian-note", obsidian_note]
+    return args
+
+
+def _service_wrapper_script(repo: str, vault: str, args: list) -> str:
+    """Render the zsh wrapper the LaunchAgent executes.
+
+    Sources the user's login profile so ``uv``/``node`` are on PATH, exports
+    VAULT, and re-runs ``uv run jarvis channel connect …`` in the repo.
+    """
+    import shlex
+
+    lines = [
+        "#!/bin/zsh",
+        '[ -f "$HOME/.zprofile" ] && source "$HOME/.zprofile"',
+        '[ -f "$HOME/.zshrc" ] && source "$HOME/.zshrc"',
+    ]
+    if vault:
+        lines.append(f"export VAULT={shlex.quote(vault)}")
+    lines.append(f"cd {shlex.quote(repo)} || exit 1")
+    lines.append("exec uv run jarvis " + " ".join(shlex.quote(a) for a in args))
+    return "\n".join(lines) + "\n"
+
+
+@channel.command("service")
+@click.argument(
+    "action",
+    type=click.Choice(["install", "uninstall", "status"]),
+)
+@click.option("--channel-type", default="whatsapp_baileys", help=_CHANNEL_TYPE_HELP)
+@click.option("--extract-tasks/--no-extract-tasks", default=True)
+@click.option("--to-reminders/--no-to-reminders", default=True)
+@click.option("--to-obsidian/--no-to-obsidian", default=True)
+@click.option("--reminders-list", default="WhatsApp")
+@click.option("--obsidian-note", default="Bandeja de WhatsApp.md")
+@click.option(
+    "--vault",
+    default="",
+    help="Obsidian vault path baked into the service (falls back to $VAULT).",
+)
+def channel_service(
+    action: str,
+    channel_type: str,
+    extract_tasks: bool,
+    to_reminders: bool,
+    to_obsidian: bool,
+    reminders_list: str,
+    obsidian_note: str,
+    vault: str,
+) -> None:
+    """Install/uninstall an always-on background service (macOS).
+
+    ``install`` sets up a launchd agent that runs ``jarvis channel connect`` in
+    the background, starts at login, and restarts on failure — no terminal
+    needed. Run it from your repo directory. ``uninstall`` removes it;
+    ``status`` shows whether it is running.
+    """
+    import os
+    import platform
+    import subprocess
+
+    console = Console()
+
+    if platform.system() != "Darwin":
+        console.print(
+            "[red]The background service is macOS-only (uses launchd).[/red]\n"
+            "[dim]On Linux use systemd --user or a supervisor of your choice.[/dim]"
+        )
+        return
+
+    paths = _service_paths()
+    plist = paths["plist"]
+    label = paths["label"]
+
+    if action == "status":
+        result = subprocess.run(
+            ["launchctl", "list", label], capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            console.print(f"[green]● Running[/green] ({label})")
+            console.print(f"[dim]Logs: tail -f {paths['log']}[/dim]")
+        else:
+            console.print(f"[yellow]○ Not running[/yellow] ({label})")
+            if not plist.exists():
+                console.print(
+                    "[dim]Not installed. Run: jarvis channel service install[/dim]"
+                )
+        return
+
+    if action == "uninstall":
+        subprocess.run(
+            ["launchctl", "unload", str(plist)], capture_output=True, text=True
+        )
+        for p in (plist, paths["wrapper"]):
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                console.print(f"[yellow]Could not remove {p}: {exc}[/yellow]")
+        console.print("[green]Service uninstalled.[/green]")
+        return
+
+    # action == "install"
+    import plistlib
+    import stat
+
+    repo = os.getcwd()
+    if not (os.path.isdir(os.path.join(repo, ".git")) or "openjarvis" in repo.lower()):
+        console.print(
+            f"[yellow]Note:[/yellow] installing with repo dir = {repo}. "
+            "Run this from your OpenJarvis checkout if that looks wrong."
+        )
+
+    vault_resolved = vault or os.environ.get("VAULT", "")
+    args = _service_connect_args(
+        channel_type,
+        extract_tasks=extract_tasks,
+        to_reminders=to_reminders,
+        to_obsidian=to_obsidian,
+        reminders_list=reminders_list,
+        obsidian_note=obsidian_note,
+    )
+    wrapper_body = _service_wrapper_script(repo, vault_resolved, args)
+
+    paths["wrapper"].parent.mkdir(parents=True, exist_ok=True)
+    plist.parent.mkdir(parents=True, exist_ok=True)
+    paths["wrapper"].write_text(wrapper_body, encoding="utf-8")
+    paths["wrapper"].chmod(paths["wrapper"].stat().st_mode | stat.S_IXUSR)
+
+    plist_data = {
+        "Label": label,
+        "ProgramArguments": [str(paths["wrapper"])],
+        "RunAtLoad": True,
+        "KeepAlive": True,
+        "ThrottleInterval": 30,
+        "StandardOutPath": str(paths["log"]),
+        "StandardErrorPath": str(paths["log"]),
+    }
+    with open(plist, "wb") as fh:
+        plistlib.dump(plist_data, fh)
+
+    # Reload (unload first in case it was already installed).
+    subprocess.run(["launchctl", "unload", str(plist)], capture_output=True, text=True)
+    load = subprocess.run(
+        ["launchctl", "load", "-w", str(plist)], capture_output=True, text=True
+    )
+    if load.returncode != 0:
+        console.print(
+            f"[red]launchctl load failed:[/red] {(load.stderr or '').strip()}\n"
+            f"[dim]Try manually: launchctl load -w {plist}[/dim]"
+        )
+        return
+
+    console.print("[green]✅ Service installed and started.[/green]")
+    console.print(f"[dim]Runs at login, restarts on failure. Repo: {repo}[/dim]")
+    console.print(f"[dim]Logs:   tail -f {paths['log']}[/dim]")
+    console.print("[dim]Status: jarvis channel service status[/dim]")
+    console.print("[dim]Remove: jarvis channel service uninstall[/dim]")
+    if to_reminders or to_obsidian or extract_tasks:
+        console.print(
+            "\n[yellow]Task extraction needs an AI engine in the background:[/yellow] "
+            "run Ollama, or set a cloud key (e.g. ANTHROPIC_API_KEY) in your "
+            "~/.zshrc so the service inherits it."
+        )
+    console.print(
+        "[yellow]Don't run 'channel connect' manually while the service is "
+        "on[/yellow] — two listeners share one WhatsApp session and conflict."
+    )
