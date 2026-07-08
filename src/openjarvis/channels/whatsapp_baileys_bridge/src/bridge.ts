@@ -97,9 +97,14 @@ async function main(): Promise<void> {
 
   // True when *jid* is our own "Message Yourself" chat, i.e. the message was
   // sent by us to ourselves. Used to let self-notes through the fromMe filter.
+  // Matches on both the phone-number JID and the privacy LID, since WhatsApp
+  // may address the self-chat by either.
   function isSelfChat(jid: string): boolean {
+    const target = bareJid(jid);
+    if (!target) return false;
     const me = bareJid(sock?.user?.id);
-    return me !== "" && bareJid(jid) === me;
+    const meLid = bareJid((sock?.user as any)?.lid);
+    return (me !== "" && target === me) || (meLid !== "" && target === meLid);
   }
 
   function startSocket(attempt: number): void {

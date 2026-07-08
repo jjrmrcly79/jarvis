@@ -143,17 +143,27 @@ _SYSTEM_PROMPT = """\
 You extract actionable TASKS and MEETINGS from a single chat message.
 
 Rules:
-- Return ONLY genuinely actionable items the message asks for or implies. If the
-  message is small talk, an acknowledgement, or has nothing to do, return an
+- Return ONLY genuinely actionable items stated in the message. If it is small
+  talk, an acknowledgement ("ok", "gracias"), or has nothing to do, return an
   empty list.
+- CRITICAL: base every field ONLY on words actually in the message. NEVER invent
+  specifics (tools, filenames, steps, people, dates) that are not written there.
+  If the message is vague, keep the title vague — do not elaborate.
+- "title" must paraphrase what the message says as a short action phrase, in the
+  SAME language as the message. If the message is in Spanish, the title MUST be
+  in Spanish. Do NOT translate to English.
 - "meeting" = an appointment/call with a time or a clear intent to meet.
   Everything else actionable is a "task".
-- "title" must be a short imperative phrase in the SAME language as the message.
 - "due": resolve relative dates ("mañana", "el viernes", "next week") against the
   provided current date. Use ISO-8601: "YYYY-MM-DD" for a date, or
   "YYYY-MM-DDTHH:MM" when a time is given. Use null if there is no due date.
-- "participants": people named as involved (may be empty).
-- "notes": short extra context, or null.
+- "participants": people explicitly named (may be empty).
+- "notes": short extra context copied from the message, or null.
+
+Example — message: "mañana voy a hacer el deploy apenas termine con nexia"
+(current date 2026-07-08) →
+{"items": [{"kind": "task", "title": "Hacer el deploy", "due": "2026-07-09",
+            "participants": [], "notes": "cuando termine con nexia"}]}
 
 Respond with a JSON object of exactly this shape and nothing else:
 {"items": [{"kind": "task"|"meeting", "title": str, "due": str|null,
