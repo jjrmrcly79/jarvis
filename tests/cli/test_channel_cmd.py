@@ -330,6 +330,36 @@ class TestServiceHelpers:
         )
         assert "--model" in args and "qwen3:8b" in args
 
+    def test_connect_args_with_calendar(self) -> None:
+        from openjarvis.cli.channel_cmd import _service_connect_args
+
+        args = _service_connect_args(
+            "whatsapp_baileys",
+            extract_tasks=True,
+            to_reminders=True,
+            to_obsidian=True,
+            reminders_list="WhatsApp",
+            obsidian_note="Bandeja de WhatsApp.md",
+            to_calendar=True,
+            calendar="Trabajo",
+        )
+        assert "--to-calendar" in args
+        assert "--calendar" in args and "Trabajo" in args
+
+    def test_connect_args_no_calendar_by_default(self) -> None:
+        from openjarvis.cli.channel_cmd import _service_connect_args
+
+        args = _service_connect_args(
+            "whatsapp_baileys",
+            extract_tasks=True,
+            to_reminders=True,
+            to_obsidian=True,
+            reminders_list="WhatsApp",
+            obsidian_note="Bandeja de WhatsApp.md",
+        )
+        assert "--to-calendar" not in args
+        assert "--calendar" not in args
+
     def test_connect_args_no_model_by_default(self) -> None:
         from openjarvis.cli.channel_cmd import _service_connect_args
 

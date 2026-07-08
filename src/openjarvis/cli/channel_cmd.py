@@ -301,6 +301,18 @@ def _resolve_engine_model(config: Any) -> Any:
     "the standard iCloud location).",
 )
 @click.option(
+    "--to-calendar/--no-to-calendar",
+    default=False,
+    help="Also create macOS Calendar events for extracted meetings "
+    "(implies --extract-tasks; no-op off macOS).",
+)
+@click.option(
+    "--calendar",
+    default="Calendario",
+    help="Calendar.app calendar for --to-calendar (falls back to the first "
+    "calendar if it doesn't exist).",
+)
+@click.option(
     "--model",
     default="",
     help="Model to use for task extraction (e.g. qwen3:8b for speed). "
@@ -314,6 +326,8 @@ def channel_connect(
     to_obsidian: bool,
     obsidian_note: str,
     vault: str,
+    to_calendar: bool,
+    calendar: str,
     model: str,
 ) -> None:
     """Connect a live channel and stream incoming messages.
@@ -324,10 +338,11 @@ def channel_connect(
 
     With ``--extract-tasks`` each incoming message is run through the LLM to
     detect actionable tasks and meetings, which are saved for later review
-    (see ``jarvis channel inbox``).  Route them to where you already look:
-    ``--to-reminders`` (macOS Reminders.app) and/or ``--to-obsidian`` (tasks as
-    checkboxes in an Obsidian note).  When both are set, tasks go to Obsidian
-    and meetings to Reminders so nothing is duplicated.
+    (see ``jarvis channel inbox``).  Route them where you want:
+    ``--to-reminders`` (Reminders.app), ``--to-obsidian`` (tasks as checkboxes
+    in an Obsidian note), ``--to-calendar`` (meetings as Calendar.app events).
+    Tasks go to Reminders and/or Obsidian; meetings go to Calendar when
+    ``--to-calendar`` is set, otherwise to Reminders.
 
     Example::
 
@@ -376,7 +391,7 @@ def channel_connect(
 
     # Build the task/meeting extractor when requested.
     extractor = None
-    if extract_tasks or to_reminders or to_obsidian:
+    if extract_tasks or to_reminders or to_obsidian or to_calendar:
         resolved = _resolve_engine_model(config)
         if resolved is None:
             console.print(
@@ -393,9 +408,9 @@ def channel_connect(
             if to_reminders:
                 from openjarvis.channels.task_sinks import AppleRemindersSink
 
-                # When Obsidian also handles tasks, keep Reminders for meetings
-                # only so nothing is duplicated across the two HUD panels.
-                rem_kinds = ("meeting",) if to_obsidian else None
+                # Meetings go to Calendar when that's enabled, so keep Reminders
+                # to tasks only in that case; otherwise it handles both kinds.
+                rem_kinds = ("task",) if to_calendar else None
                 rem = AppleRemindersSink(list_name=reminders_list, kinds=rem_kinds)
                 sinks.append(rem)
                 if not rem.available:
@@ -413,6 +428,16 @@ def channel_connect(
                         "[yellow]--to-obsidian: vault not found (set --vault or "
                         "$VAULT); tasks will be saved but not written to a "
                         "note.[/yellow]"
+                    )
+            if to_calendar:
+                from openjarvis.channels.task_sinks import AppleCalendarSink
+
+                cal = AppleCalendarSink(calendar_name=calendar)
+                sinks.append(cal)
+                if not cal.available:
+                    console.print(
+                        "[yellow]--to-calendar is macOS-only; meetings will be "
+                        "saved but not added to Calendar.app.[/yellow]"
                     )
 
             from openjarvis.channels.task_extraction import (
@@ -592,6 +617,8 @@ def _service_connect_args(
     to_obsidian: bool,
     reminders_list: str,
     obsidian_note: str,
+    to_calendar: bool = False,
+    calendar: str = "Calendario",
     model: str = "",
 ) -> list:
     """Build the ``jarvis`` argv the service should run on each launch."""
@@ -600,12 +627,16 @@ def _service_connect_args(
         args.append("--to-reminders")
     if to_obsidian:
         args.append("--to-obsidian")
-    if extract_tasks and not (to_reminders or to_obsidian):
+    if to_calendar:
+        args.append("--to-calendar")
+    if extract_tasks and not (to_reminders or to_obsidian or to_calendar):
         args.append("--extract-tasks")
     if reminders_list and reminders_list != "WhatsApp":
         args += ["--reminders-list", reminders_list]
     if obsidian_note and obsidian_note != "Bandeja de WhatsApp.md":
         args += ["--obsidian-note", obsidian_note]
+    if to_calendar and calendar and calendar != "Calendario":
+        args += ["--calendar", calendar]
     if model:
         args += ["--model", model]
     return args
@@ -648,8 +679,10 @@ def _service_wrapper_script(
 @click.option("--extract-tasks/--no-extract-tasks", default=True)
 @click.option("--to-reminders/--no-to-reminders", default=True)
 @click.option("--to-obsidian/--no-to-obsidian", default=True)
+@click.option("--to-calendar/--no-to-calendar", default=False)
 @click.option("--reminders-list", default="WhatsApp")
 @click.option("--obsidian-note", default="Bandeja de WhatsApp.md")
+@click.option("--calendar", default="Calendario")
 @click.option(
     "--vault",
     default="",
@@ -666,8 +699,10 @@ def channel_service(
     extract_tasks: bool,
     to_reminders: bool,
     to_obsidian: bool,
+    to_calendar: bool,
     reminders_list: str,
     obsidian_note: str,
+    calendar: str,
     vault: str,
     model: str,
 ) -> None:
@@ -761,6 +796,8 @@ def channel_service(
         to_obsidian=to_obsidian,
         reminders_list=reminders_list,
         obsidian_note=obsidian_note,
+        to_calendar=to_calendar,
+        calendar=calendar,
         model=model,
     )
     wrapper_body = _service_wrapper_script(repo, vault_resolved, args, path_dirs)

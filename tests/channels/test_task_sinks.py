@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 from openjarvis.channels.task_extraction import ExtractedItem
 from openjarvis.channels.task_sinks import (
+    AppleCalendarSink,
     AppleRemindersSink,
     ObsidianTasksSink,
     combine_sinks,
@@ -201,6 +202,74 @@ class TestObsidianTasksSink:
         sink = ObsidianTasksSink(note="inbox.md")
         sink(_item(title="Desde env"))
         assert (tmp_path / "inbox.md").exists()
+
+
+class TestAppleCalendarSink:
+    def _meeting(self, **kw):
+        base = dict(kind="meeting", title="Junta con Ana", due="2026-07-10T10:00")
+        base.update(kw)
+        return ExtractedItem(**base)
+
+    def test_ignores_tasks(self):
+        sink = AppleCalendarSink()
+        with (
+            patch("platform.system", return_value="Darwin"),
+            patch("subprocess.run") as run,
+        ):
+            sink(_item(kind="task", title="Pagar renta", due="2026-07-10"))
+        run.assert_not_called()
+
+    def test_noop_off_macos(self):
+        sink = AppleCalendarSink()
+        with (
+            patch("platform.system", return_value="Linux"),
+            patch("subprocess.run") as run,
+        ):
+            sink(self._meeting())
+        run.assert_not_called()
+
+    def test_creates_event_with_datetime(self):
+        sink = AppleCalendarSink(calendar_name="Trabajo", duration_min=45)
+        proc = MagicMock(returncode=0, stdout="", stderr="")
+        with (
+            patch("platform.system", return_value="Darwin"),
+            patch("subprocess.run", return_value=proc) as run,
+        ):
+            sink(self._meeting(participants=["Ana"]))
+        args = run.call_args[0][0]
+        assert args[0] == "osascript"
+        # script args: calendar, summary, y, m, d, h, min, dur, notes
+        assert args[3] == "Trabajo"
+        assert "Junta con Ana" in args[4]
+        assert args[5:11] == ["2026", "7", "10", "10", "0", "45"]
+
+    def test_date_only_uses_default_hour(self):
+        sink = AppleCalendarSink(default_hour=8)
+        proc = MagicMock(returncode=0, stdout="", stderr="")
+        with (
+            patch("platform.system", return_value="Darwin"),
+            patch("subprocess.run", return_value=proc) as run,
+        ):
+            sink(self._meeting(due="2026-07-10"))
+        args = run.call_args[0][0]
+        assert args[5:10] == ["2026", "7", "10", "8", "0"]
+
+    def test_meeting_without_date_skipped(self):
+        sink = AppleCalendarSink()
+        with (
+            patch("platform.system", return_value="Darwin"),
+            patch("subprocess.run") as run,
+        ):
+            sink(self._meeting(due=None))
+        run.assert_not_called()
+
+    def test_osascript_failure_does_not_raise(self):
+        sink = AppleCalendarSink()
+        with (
+            patch("platform.system", return_value="Darwin"),
+            patch("subprocess.run", side_effect=OSError("boom")),
+        ):
+            sink(self._meeting())
 
 
 class TestCombineSinks:

@@ -300,6 +300,135 @@ def _date_only(due: Optional[str]) -> Optional[str]:
     return dt.strftime("%Y-%m-%d") if dt is not None else None
 
 
+# ---------------------------------------------------------------------------
+# Apple Calendar
+# ---------------------------------------------------------------------------
+
+# AppleScript: create a timed event in a named calendar, falling back to the
+# first calendar when the named one does not exist (calendar names are
+# localized, e.g. "Calendar" vs "Calendario").
+_CAL_CREATE_SCRIPT = """on run argv
+  set calName to item 1 of argv
+  set evSummary to item 2 of argv
+  set yr to (item 3 of argv) as integer
+  set mo to (item 4 of argv) as integer
+  set dy to (item 5 of argv) as integer
+  set hr to (item 6 of argv) as integer
+  set mi to (item 7 of argv) as integer
+  set durMin to (item 8 of argv) as integer
+  set evNotes to item 9 of argv
+  set startDate to current date
+  set day of startDate to 1
+  set year of startDate to yr
+  set month of startDate to mo
+  set day of startDate to dy
+  set hours of startDate to hr
+  set minutes of startDate to mi
+  set seconds of startDate to 0
+  set endDate to startDate + (durMin * minutes)
+  tell application "Calendar"
+    if (exists calendar calName) then
+      set tgt to calendar calName
+    else
+      set tgt to item 1 of calendars
+    end if
+    tell tgt
+      set newEv to make new event with properties {summary:evSummary}
+      set start date of newEv to startDate
+      set end date of newEv to endDate
+      if evNotes is not "" then set description of newEv to evNotes
+    end tell
+  end tell
+end run"""
+
+
+class AppleCalendarSink:
+    """Create macOS Calendar events for extracted *meetings*.
+
+    Tasks are ignored (route those to Reminders/Obsidian).  A meeting with no
+    parseable date is skipped (a calendar event needs a date).
+
+    Parameters
+    ----------
+    calendar_name:
+        Target calendar.  Falls back to the first calendar when it does not
+        exist (names are localized).
+    default_hour:
+        Hour to use when a meeting has a date but no time.
+    duration_min:
+        Event length in minutes.
+
+    No-op on non-macOS systems.
+    """
+
+    def __init__(
+        self,
+        calendar_name: str = "Calendario",
+        *,
+        default_hour: int = 9,
+        duration_min: int = 60,
+    ) -> None:
+        self._calendar = calendar_name
+        self._default_hour = default_hour
+        self._duration_min = duration_min
+
+    @property
+    def available(self) -> bool:
+        """True on macOS, where ``osascript``/Calendar.app exist."""
+        return platform.system() == "Darwin"
+
+    def __call__(self, item: ExtractedItem) -> None:
+        """Create a calendar event for a meeting (no-op otherwise/off macOS)."""
+        if item.kind != "meeting":
+            return
+        if not self.available:
+            logger.debug("AppleCalendarSink skipped: not macOS")
+            return
+
+        start = _parse_due(item.due)
+        if start is None:
+            logger.debug("AppleCalendarSink: meeting without a date, skipping")
+            return
+        if start.hour == 0 and start.minute == 0:
+            start = start.replace(hour=self._default_hour)
+
+        notes_parts = []
+        if item.participants:
+            notes_parts.append("Con: " + ", ".join(item.participants))
+        if item.notes:
+            notes_parts.append(item.notes)
+        if item.source_sender:
+            notes_parts.append(f"(via {item.source_channel} — {item.source_sender})")
+        notes = "\n".join(notes_parts)
+
+        args = [
+            self._calendar,
+            item.title,
+            str(start.year),
+            str(start.month),
+            str(start.day),
+            str(start.hour),
+            str(start.minute),
+            str(self._duration_min),
+            notes,
+        ]
+        try:
+            proc = subprocess.run(
+                ["osascript", "-e", _CAL_CREATE_SCRIPT, *args],
+                capture_output=True,
+                text=True,
+                timeout=40,
+            )
+        except Exception:
+            logger.exception("AppleCalendarSink: osascript failed")
+            return
+        if proc.returncode != 0:
+            logger.warning(
+                "AppleCalendarSink: Calendar.app error: %s",
+                (proc.stderr or "").strip(),
+            )
+
+
 def combine_sinks(*sinks: Optional[Sink]) -> Optional[Sink]:
     """Combine several sinks into one that fans out to each.
 
@@ -324,6 +453,7 @@ def combine_sinks(*sinks: Optional[Sink]) -> Optional[Sink]:
 
 
 __all__ = [
+    "AppleCalendarSink",
     "AppleRemindersSink",
     "ObsidianTasksSink",
     "combine_sinks",

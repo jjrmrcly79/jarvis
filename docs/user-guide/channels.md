@@ -251,15 +251,20 @@ Route the extracted items to where you already look:
   change it), read by the HUD's pending-task scanner. The vault is taken from
   `--vault`, then `$VAULT`, then the standard iCloud location. Meetings are not
   written here.
+- `--to-calendar` (macOS) creates **meetings** as Calendar.app events in the
+  `Calendario` calendar (`--calendar` to change it; falls back to the first
+  calendar if that name doesn't exist).
 
 ```bash
-# tasks → Obsidian, meetings → Reminders (no duplication)
-jarvis channel connect --channel-type whatsapp_baileys --to-reminders --to-obsidian
+# tasks → Reminders + Obsidian, meetings → Calendar
+jarvis channel connect --channel-type whatsapp_baileys \
+    --to-reminders --to-obsidian --to-calendar
 ```
 
-When both flags are set, tasks go to Obsidian and meetings to Reminders so a
-task never appears in two HUD panels. Use either flag on its own to send
-everything to a single destination.
+Routing rules: **tasks** go to Reminders and/or Obsidian (both, if both flags
+are set). **Meetings** go to Calendar when `--to-calendar` is set; otherwise
+they go to Reminders. This keeps each item in the right HUD panel without
+duplicating meetings across Reminders and Calendar.
 
 Extraction uses the same engine/model resolution as `jarvis ask` (start Ollama
 or set a cloud API key). Relative dates like "mañana" or "el viernes" are
