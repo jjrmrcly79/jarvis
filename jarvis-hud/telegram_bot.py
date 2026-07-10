@@ -62,10 +62,20 @@ def _get_claude():
         _claude_client = anthropic.Anthropic()  # lee ANTHROPIC_API_KEY del entorno
     return _claude_client
 
-SYSTEM = ("Eres J.A.R.V.I.S, el asistente personal de tu jefe, por Telegram. "
-          "Respondes en español, sereno y elegante, conciso (1-4 frases salvo que "
-          "pidan detalle). Llamas al usuario 'señor' o 'jefe' a veces. Nunca inventas "
-          "datos: si te dan DATOS REALES de notas/pendientes, úsalos tal cual.")
+SYSTEM = ("Eres Jarvis (con la voz de Angie), la asistente personal de Juan, por "
+          "Telegram. Hablas español colombiano, cálido y coloquial, como una amiga "
+          "paisa de confianza: lo llamas 'Juanchi' o 'Juancho' (NUNCA 'señor' ni "
+          "'jefe'), saludas con «¿qué más, Juanchi?» o parecido y te despides con "
+          "«chaíto» (nunca 'chao', 'adiós' ni 'buenas noches' a secas). Usas jerga "
+          "COLOMBIANA con naturalidad y sin exagerar: parce, listo, de una, bacano, "
+          "chévere, hágale pues, qué pena (para disculparte), con mucho gusto, a la "
+          "orden. PROHIBIDA la jerga de otros países: nada de 'qué onda', 'órale', "
+          "'güey', 'tío', 'che'. Ejemplos de tu estilo: «¿Qué más, Juanchi? ¿Cómo va "
+          "todo?» · «Listo parce, de una.» · «Uy, qué pena Juancho, eso no lo "
+          "encontré.» · «Chaíto, que descanses.» Puedes usar 'usted' paisa o tutear, "
+          "como salga natural. Concisa (1-4 frases salvo que pidan detalle). Nunca "
+          "inventas datos: si te dan DATOS REALES de notas/pendientes, úsalos tal "
+          "cual.")
 
 histories = {}   # chat_id -> [mensajes]
 
@@ -336,7 +346,7 @@ def reminder_create_flow(text):
     if not title or len(title) < 2:
         title = _strip_reminder_prefix(text)
     if not title:
-        return "¿Qué quiere que le recuerde, señor?"
+        return "¿Qué quiere que le recuerde, Juanchi?"
 
     # Vencimiento: primero reglas deterministas; si no, lo que diga el LLM.
     due_dt = _parse_due(text)
@@ -376,14 +386,14 @@ def reminder_create_flow(text):
 
     res = serve_hud.create_reminder(title, list_name=list_name, due_dt=due_dt)
     if not res.get("ok"):
-        return (f"No pude crear el recordatorio «{title}», señor. Reminders respondió: "
+        return (f"No pude crear el recordatorio «{title}», Juanchi. Reminders respondió: "
                 f"{res.get('error', 'error desconocido')}.")
 
     when_txt = f"\n📅 vence {_fmt_when(due_dt)}" if due_dt else ""
     cm.log_event("accion", detalle=f"Recordatorio creado: «{title}» "
                  f"(lista {res.get('list', list_name)}"
                  + (f", vence {_fmt_when(due_dt)}" if due_dt else "") + ")")
-    return (f"✅ Recordatorio creado, señor:\n«{title}»\n"
+    return (f"✅ Recordatorio creado, Juanchi:\n«{title}»\n"
             f"Lista: {res.get('list', list_name)}{when_txt}")
 
 
@@ -477,29 +487,29 @@ def cal_create_flow(text):
         raw = _extract_complete([{"role": "system", "content": sys_p},
                               {"role": "user", "content": text}])
     except Exception as e:
-        return f"No pude contactar el núcleo para procesar la cita ({e}), señor."
+        return f"No pude contactar el núcleo para procesar la cita ({e}), Juanchi."
 
     m = re.search(r"\{[\s\S]*\}", raw)
     if not m:
-        return ("No me quedaron claros los datos de la cita, señor. "
+        return ("No me quedaron claros los datos de la cita, Juanchi. "
                 "¿Me lo dice completo? (ej. «agéndame junta con Pedro mañana 10:00»)")
     try:
         data = json.loads(m.group(0))
     except Exception:
-        return ("No me quedaron claros los datos de la cita, señor. "
+        return ("No me quedaron claros los datos de la cita, Juanchi. "
                 "¿Me lo dice completo? (ej. «agéndame junta con Pedro mañana 10:00»)")
 
     title = (data.get("title") or "").strip() or "Evento"
     d, st = data.get("date"), data.get("start")
     if not d or not st:
         falta = "la fecha" if not d else "la hora"
-        return (f"Con gusto agendo «{title}», señor, pero me falta {falta}. "
+        return (f"Con gusto agendo «{title}», Juanchi, pero me falta {falta}. "
                 "¿Me lo indica en un mensaje? (ej. «agéndame X mañana 10:00»)")
     try:
         sh, sm = (int(x) for x in str(st).split(":")[:2])
         start_dt = datetime.strptime(d, "%Y-%m-%d").replace(hour=sh, minute=sm)
     except Exception:
-        return ("La fecha u hora no quedaron bien, señor. "
+        return ("La fecha u hora no quedaron bien, Juanchi. "
                 "¿Me las repite? (ej. «mañana 10:00»)")
 
     end_dt = None
@@ -515,14 +525,14 @@ def cal_create_flow(text):
         title, start_dt, end_dt=end_dt,
         location=(data.get("location") or ""), notes=(data.get("notes") or ""))
     if not res.get("ok"):
-        return (f"No pude agendar «{title}», señor. Calendar.app respondió: "
+        return (f"No pude agendar «{title}», Juanchi. Calendar.app respondió: "
                 f"{res.get('error', 'error desconocido')}.")
 
     fin = f"–{end_dt.hour:02d}:{end_dt.minute:02d}" if end_dt else ""
     loc = res.get("calendar", "Calendario")
     cm.log_event("accion", detalle=f"Evento agendado: «{title}» "
                  f"{_fmt_when(start_dt)}{fin} ({loc})")
-    return (f"✅ Agendado, señor:\n«{title}»\n{_fmt_when(start_dt)}{fin}\n"
+    return (f"✅ Agendado, Juanchi:\n«{title}»\n{_fmt_when(start_dt)}{fin}\n"
             f"{loc} (iCloud). Ya está en su Mac.")
 
 
@@ -674,7 +684,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
              "\n\n🧠 Aún no tengo su perfil: corra /onboarding (6 preguntas) "
              "para armar el núcleo de su segundo cerebro.")
     await update.message.reply_text(
-        "👋 J.A.R.V.I.S a su disposición, señor.\n"
+        "👋 ¿Qué más, Juanchi? Aquí Jarvis, a la orden.\n"
         "Escríbame lo que necesite. Pregúnteme por sus pendientes "
         "(ej. «¿qué tengo en Nexia?») o cualquier cosa de sus notas.\n"
         "Use /voz para activar o silenciar mis respuestas habladas." + extra)
@@ -693,7 +703,7 @@ async def cmd_voz(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         VOICE_REPLY[chat_id] = not _tts_voice_enabled(chat_id)
     estado = "activada 🔊" if _tts_voice_enabled(chat_id) else "silenciada 🔇"
-    await update.message.reply_text(f"Voz {estado}, señor.")
+    await update.message.reply_text(f"Voz {estado}, Juanchi.")
 
 
 async def cmd_dios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -703,7 +713,7 @@ async def cmd_dios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not _claude_available():
         await update.message.reply_text(
-            "No tengo configurado Claude, señor: falta ANTHROPIC_API_KEY "
+            "No tengo configurado Claude, Juanchi: falta ANTHROPIC_API_KEY "
             "(o el SDK 'anthropic') en el entorno del bot.")
         return
     arg = (ctx.args[0].lower() if ctx.args else "")
@@ -715,11 +725,11 @@ async def cmd_dios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         GOD_MODE[chat_id] = not GOD_MODE.get(chat_id)
     if GOD_MODE[chat_id]:
         await update.message.reply_text(
-            f"🧠 Modo dios ACTIVADO, señor — razono con {GOD_MODEL}. "
+            f"🧠 Modo dios ACTIVADO, Juanchi — razono con {GOD_MODEL}. "
             "Use /normal para volver al modelo local.")
     else:
         await update.message.reply_text(
-            "🔌 Modo dios desactivado. Vuelvo al modelo local (Ollama), señor.")
+            "🔌 Modo dios desactivado. Vuelvo al modelo local (Ollama), Juanchi.")
 
 
 async def cmd_normal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -728,7 +738,7 @@ async def cmd_normal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     GOD_MODE[update.effective_chat.id] = False
     await update.message.reply_text(
-        "🔌 Modo local (Ollama) activo, señor. Use /dios para el modo poderoso.")
+        "🔌 Modo local (Ollama) activo, Juanchi. Use /dios para el modo poderoso.")
 
 
 async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
@@ -862,12 +872,12 @@ async def _do_file_and_ask_delete(query_or_bot, state, token):
     accion = "creé" if res["nuevo"] else "actualicé"
     if not state.get("audio"):
         # nota de texto: no hay audio que borrar → confirmación final directa
-        txt = (f"✅ Listo, señor. {accion.capitalize()} *{res['title']}* "
+        txt = (f"✅ Listo, Juanchi. {accion.capitalize()} *{res['title']}* "
                f"en _{res['area_label']}_.\n`{res['rel']}`")
         await _edit_or_send(query_or_bot, state, txt, None)
         PENDING.pop(token, None)
         return
-    txt = (f"✅ Listo, señor. {accion.capitalize()} *{res['title']}* "
+    txt = (f"✅ Listo, Juanchi. {accion.capitalize()} *{res['title']}* "
            f"en _{res['area_label']}_.\n`{res['rel']}`\n\n¿Borro la nota de voz?")
     await _edit_or_send(query_or_bot, state, txt, _del_markup(token))
 
@@ -891,7 +901,7 @@ async def _edit_or_send(query_or_bot, state, text, markup):
 ONBOARD = {}   # chat_id -> {"i": paso actual, "data": {clave: respuesta}}
 
 TOUR = (
-    "🧭 *Su segundo cerebro quedó armado, señor. Así se usa:*\n\n"
+    "🧭 *Su segundo cerebro quedó armado, Juanchi. Así se usa:*\n\n"
     "*Capturar*\n"
     "· Nota de voz (Telegram o Memos de Apple) → la transcribo y archivo\n"
     "· «toma nota: …» o /nota → nota de texto al vault\n"
@@ -928,7 +938,7 @@ async def cmd_onboarding(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
           "anterior queda en el historial.)_" if ob.profile_exists() else "")
     await update.message.reply_text(
         "🧠 *Onboarding del segundo cerebro*\n"
-        "Le haré 6 preguntas, señor. Con sus respuestas construyo su perfil en "
+        "Le haré 6 preguntas, Juanchi. Con sus respuestas construyo su perfil en "
         "Obsidian y lo uso para priorizar briefs, pendientes y correo. "
         "Conteste con texto libre; puede saltar cualquiera." + ya,
         parse_mode="Markdown")
@@ -976,7 +986,7 @@ async def on_ob_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if verb == "cancel":
         ONBOARD.pop(chat_id, None)
-        await q.edit_message_text("Onboarding cancelado, señor. "
+        await q.edit_message_text("Onboarding cancelado, Juanchi. "
                                   "Retómelo cuando guste con /onboarding.")
         return
     if verb == "skip":
@@ -993,7 +1003,7 @@ async def capture_note_flow(update, ctx, content):
     chat_id = update.effective_chat.id
     if not content or len(content) < 3:
         await update.message.reply_text(
-            "📝 ¿Qué anoto, señor? Mándeme «toma nota: …» con el contenido.")
+            "📝 ¿Qué anoto, Juanchi? Mándeme «toma nota: …» con el contenido.")
         return
     await ctx.bot.send_chat_action(chat_id, "typing")
     cls = await asyncio.to_thread(vn.classify, content, _extract_complete)
@@ -1017,7 +1027,7 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = update.effective_chat.id
     await ctx.bot.send_chat_action(chat_id, "typing")
-    msg = await update.message.reply_text("🎙️ Transcribiendo su nota, señor…")
+    msg = await update.message.reply_text("🎙️ Ya te escucho, Juanchi…")
 
     VOICE_TMP.mkdir(parents=True, exist_ok=True)
     voice = update.message.voice or update.message.audio
@@ -1031,7 +1041,7 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if not text:
-        await msg.edit_text("🤔 No alcancé a entender nada del audio, señor.")
+        await msg.edit_text("🤔 No alcancé a entender nada del audio, Juanchi.")
         return
 
     # «toma nota…» dictado → flujo de notas de siempre (archiva audio + nota)
@@ -1063,7 +1073,7 @@ async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     token = parts[-1]
     state = PENDING.get(token)
     if not state:
-        await q.edit_message_text("⌛ Esa nota ya expiró, señor. Reenvíela, por favor.")
+        await q.edit_message_text("⌛ Esa nota ya expiró, Juanchi. Reenvíela, por favor.")
         return
 
     if verb == "ok":
@@ -1227,7 +1237,7 @@ def _brief_llm(msgs, fallback_parts):
     except Exception as e:
         print(f"[brief] LLM falló ({e}) — mando datos crudos", flush=True)
     raw = "\n\n".join(p for p in fallback_parts if p)
-    return raw[:_TG_MAX] if raw else "Sin datos disponibles para el brief, señor."
+    return raw[:_TG_MAX] if raw else "Sin datos disponibles para el brief, Juanchi."
 
 
 def morning_brief_text():
@@ -1294,7 +1304,8 @@ def evening_brief_text():
             {"role": "system", "content":
              "Redacta el CIERRE DEL DÍA para Juan con los DATOS REALES que siguen. "
              "Formato: 2-3 líneas de balance, luego secciones ⏳ Quedó abierto · "
-             "📅 Mañana (agenda y vencimientos). Breve, sereno. Usa solo los datos "
+             "📅 Mañana (agenda y vencimientos). Breve, en tu tono paisa, y cierra "
+             "con un «chaíto». Usa solo los datos "
              "provistos; si no hay nada en una sección, dilo en una línea. Si viene "
              "un PERFIL, señala qué de mañana acerca (o aleja) de esas metas."}]
     try:
@@ -1406,7 +1417,7 @@ async def cmd_diario(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     res = await asyncio.to_thread(cm.distill_day, None, _extract_complete)
     if res.get("ok"):
         await update.message.reply_text(
-            f"📓 Diario del día actualizado, señor ({res['chats']} turnos):\n"
+            f"📓 Diario del día actualizado, Juanchi ({res['chats']} turnos):\n"
             f"`{res['rel']}`", parse_mode="Markdown")
     else:
         await update.message.reply_text(

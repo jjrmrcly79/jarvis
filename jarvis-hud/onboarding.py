@@ -21,7 +21,7 @@ PROFILE = VAULT / "Personal" / "Segundo Cerebro" / "Perfil (Jarvis).md"
 
 STEPS = [
     {"key": "metas", "title": "🎯 Metas del trimestre",
-     "q": "1/6 · 🎯 ¿Cuáles son sus 3 metas principales de este trimestre, señor? "
+     "q": "1/6 · 🎯 ¿Cuáles son tus 3 metas principales de este trimestre, Juanchi? "
           "(una por línea)"},
     {"key": "nexia", "title": "🏭 Nexia — prioridades",
      "q": "2/6 · 🏭 En NEXIA, ¿qué es lo más importante ahora? "
