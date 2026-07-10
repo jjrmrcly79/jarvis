@@ -488,6 +488,20 @@ def channel_connect(
                         "[red]Channel entered an error state. "
                         "Run with logging enabled for details.[/red]"
                     )
+                    # El bridge ya agotó sus reintentos internos; salir con
+                    # código != 0 para que launchd (KeepAlive) nos relance
+                    # y el canal reconecte con las credenciales guardadas.
+                    time.sleep(30)
+                    if ch.status().value == "error":
+                        console.print(
+                            "[red]Error persistente — saliendo para que el "
+                            "supervisor relance el canal.[/red]"
+                        )
+                        try:
+                            ch.disconnect()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        raise SystemExit(1)
                 last_status = st
             time.sleep(0.5)
     except KeyboardInterrupt:
