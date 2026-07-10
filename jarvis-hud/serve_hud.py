@@ -17,13 +17,18 @@ CORE = os.environ.get("JARVIS_CORE", "http://127.0.0.1:8000")
 HUD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
 PROXY_PREFIXES = ("/v1", "/health", "/dashboard", "/agents", "/models")
 
-# ---------- TTS (Piper · voz neuronal local, $0, offline) ----------
+# ---------- TTS (ElevenLabs primario · Piper local $0 de respaldo) ----------
 import io, wave, threading
 TTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tts")
 TTS_MODEL = os.environ.get(
     "JARVIS_TTS_MODEL", os.path.join(TTS_DIR, "es_AR-daniela-high.onnx"))
 # length_scale > 1 = más pausada/elegante; ajustable sin tocar código
 TTS_LENGTH_SCALE = float(os.environ.get("JARVIS_TTS_SPEED", "1.06"))
+# ElevenLabs: si hay API key en el entorno se usa como voz principal;
+# la key vive SOLO en los plists de launchd (el repo es público upstream).
+ELEVEN_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
+ELEVEN_VOICE = os.environ.get("JARVIS_ELEVEN_VOICE", "EXAVITQu4vr4xnSDxMaL")
+ELEVEN_MODEL = os.environ.get("JARVIS_ELEVEN_MODEL", "eleven_multilingual_v2")
 _tts_voice = None
 _tts_lock = threading.Lock()  # la sesión onnxruntime no es segura en concurrencia
 
@@ -45,16 +50,61 @@ def _tts_normalize(text):
     return _JARVIS_RE.sub("Jarvis", text or "")
 
 
-def synth_wav_bytes(text):
-    """Sintetiza `text` a WAV (bytes) con la voz Piper. Carga el modelo una vez."""
+def _eleven_wav_bytes(text):
+    """Sintetiza con ElevenLabs (PCM 22050 → WAV). Lanza excepción si falla."""
+    req = urllib.request.Request(
+        "https://api.elevenlabs.io/v1/text-to-speech/"
+        f"{ELEVEN_VOICE}?output_format=pcm_22050",
+        data=json.dumps({"text": text, "model_id": ELEVEN_MODEL}).encode(),
+        headers={"xi-api-key": ELEVEN_KEY, "Content-Type": "application/json"},
+    )
+    # El Python de python.org en macOS no trae los certificados del sistema
+    # → usar el bundle de certifi (ya viene en el venv vía httpx).
+    import ssl
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context()
+    with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+        pcm = resp.read()
+    if not pcm:
+        raise RuntimeError("ElevenLabs devolvió audio vacío")
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)   # PCM 16-bit
+        wf.setframerate(22050)
+        wf.writeframes(pcm)
+    return buf.getvalue()
+
+
+def _piper_wav_bytes(text):
+    """Sintetiza con la voz Piper local. Carga el modelo una vez."""
     from piper.config import SynthesisConfig
     voice = _get_tts_voice()
     cfg = SynthesisConfig(length_scale=TTS_LENGTH_SCALE)
     buf = io.BytesIO()
     with _tts_lock:
         with wave.open(buf, "wb") as wf:
-            voice.synthesize_wav(_tts_normalize(text), wf, cfg)
+            voice.synthesize_wav(text, wf, cfg)
     return buf.getvalue()
+
+
+def synth_wav_bytes(text):
+    """Sintetiza `text` a WAV (bytes): ElevenLabs si hay key, Piper de respaldo.
+
+    Fail-open: cualquier error de ElevenLabs (red, cuota agotada, plan) cae a
+    la voz local sin romper al usuario.
+    """
+    clean = _tts_normalize(text)
+    if ELEVEN_KEY:
+        try:
+            return _eleven_wav_bytes(clean)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[tts] ElevenLabs falló ({exc}); usando Piper local",
+                  file=sys.stderr)
+    return _piper_wav_bytes(clean)
 
 VAULT = Path(os.environ.get(
     "VAULT",
