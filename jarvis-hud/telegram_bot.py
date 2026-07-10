@@ -78,6 +78,7 @@ SYSTEM = ("Eres Jarvis (con la voz de Angie), la asistente personal de Juan, por
           "cual.")
 
 histories = {}   # chat_id -> [mensajes]
+LAST_TASKS = {}  # chat_id -> [tarea|None] última lista numerada mostrada (None = ya cerrada)
 
 # --- estado de notas de voz ---
 PENDING = {}        # token -> estado de una nota en clasificación
@@ -536,29 +537,178 @@ def cal_create_flow(text):
             f"{loc} (iCloud). Ya está en su Mac.")
 
 
-def task_context(text):
-    """Datos reales de pendientes (determinista, sin alucinar)."""
+def task_context(text, chat_id=None):
+    """Datos reales de pendientes (determinista, sin alucinar).
+
+    Numera la lista y la guarda en LAST_TASKS[chat_id] para que
+    «cierra 2, 3 y 5» se resuelva de forma determinista contra
+    exactamente lo que se le mostró al usuario.
+    """
+    _NUM_HINT = ("\nMuestra los pendientes numerados EXACTAMENTE con estos números "
+                 "(no los reordenes ni renumeres). El usuario puede cerrarlos "
+                 "diciendo «cierra 2 y 5» o «ya hice la de …».")
     try:
         data = serve_hud.scan_tasks()
         projs = {p["name"].lower(): p["name"] for p in data["projects"]}
         for low, name in projs.items():
             if low in text.lower():
                 d = serve_hud.project_tasks(name)
-                lines = "\n".join("- " + t["text"] + (f" (📅 {t['due']})" if t["due"] else "")
-                                  for t in d["tasks"])
+                shown = d["tasks"]
+                if chat_id is not None:
+                    LAST_TASKS[chat_id] = list(shown)
+                lines = "\n".join(
+                    f"{i}. {t['text']}" + (f" (📅 {t['due']})" if t["due"] else "")
+                    for i, t in enumerate(shown, start=1))
                 return (f"DATOS REALES de Obsidian — pendientes ABIERTOS de {d['project']} "
-                        f"({d['open']} total):\n{lines}")
+                        f"({d['open']} total):\n{lines}" + _NUM_HINT)
+        # lista general: vencidas → vencen hoy → recientes (sin duplicar)
+        shown, seen = [], set()
+        for t in data["overdue"] + data["due_today"] + data["recent"]:
+            key = (t["path"], t["line"])
+            if key not in seen:
+                seen.add(key)
+                shown.append(t)
+        if chat_id is not None:
+            LAST_TASKS[chat_id] = list(shown)
         s = f"DATOS REALES de Obsidian (hoy {data['today']}):\n"
         s += f"Total pendientes: {data['total_open']}\n"
         s += "Por proyecto: " + ", ".join(f"{p['name']}={p['open']}" for p in data["projects"]) + "\n"
-        if data["overdue"]:
-            s += "VENCIDAS: " + " · ".join(f"{t['text']} [{t['project']}, {t['due']}]"
-                                           for t in data["overdue"]) + "\n"
-        s += "Pendientes recientes:\n" + "\n".join(
-            f"- [{t['project']}] {t['text']}" for t in data["recent"])
-        return s
+        s += "Pendientes (vencidas primero):\n" + "\n".join(
+            f"{i}. [{t['project']}] {t['text']}"
+            + (f" (📅 {t['due']}{' VENCIDA' if t['due'] < data['today'] else ''})" if t["due"] else "")
+            for i, t in enumerate(shown, start=1))
+        return s + _NUM_HINT
     except Exception:
         return None
+
+
+# --------- Cierre de pendientes por chat («cierra 2, 3 y 5») -------------
+
+_CLOSE_VERB = re.compile(
+    r"\b(cierra\w*|cierre\w*|cerrar|cerrad[oa]s?|palome\w+|complet[eé]|"
+    r"completad[oa]s?|termin[eé]|terminad[oa]s?|ya\s+hice|ya\s+la[s]?\s+hice|"
+    r"marca\w*\s+como\s+hech[oa]s?|ya\s+(?:está|están|quedó|quedaron)\s+"
+    r"(?:hech[oa]s?|list[oa]s?))\b", re.I)
+_TASK_WORD = re.compile(r"\b(tareas?|pendientes?|actividad(?:es)?|puntos?|notas?)\b", re.I)
+_RANGE_RE = re.compile(r"\b(\d{1,3})\s*(?:al?|hasta)\s+(?:la\s+|el\s+)?(\d{1,3})\b", re.I)
+
+
+def _strip_accents(s):
+    import unicodedata
+    return "".join(c for c in unicodedata.normalize("NFD", s)
+                   if unicodedata.category(c) != "Mn").lower()
+
+
+def _norm_title(s):
+    """Normaliza para comparar: sin acentos/markdown, sin puntuación final."""
+    s = _strip_accents(s or "").replace("*", "").replace("`", "")
+    return re.sub(r"\s+", " ", s).strip().rstrip(".,;:!?")
+
+
+_STOP_WORDS = {"la", "el", "los", "las", "de", "del", "en", "al", "a", "y", "o",
+               "un", "una", "que", "para", "por", "con", "este", "esta", "ya",
+               "mi", "su", "se", "le", "lo", "es", "the", "and", "to", "in"}
+
+
+def _sig_words(s):
+    return [w for w in re.findall(r"[a-z0-9]+", _norm_title(s))
+            if w not in _STOP_WORDS]
+
+
+def _word_match(a, b):
+    """Palabras iguales, o que comparten prefijo de 4+ letras (llamar≈llamarle)."""
+    if a == b:
+        return True
+    return len(a) >= 4 and len(b) >= 4 and (a.startswith(b[:4]) and b.startswith(a[:4]))
+
+
+def _fuzzy_title_hits(text, shown):
+    """Índices (1-based) de tareas cuyo título coincide con el mensaje por
+    palabras significativas (≥60% del título presente, mínimo según largo)."""
+    words = _sig_words(text)
+    out = []
+    for i, t in enumerate(shown or [], start=1):
+        if not t:
+            continue
+        title = _sig_words(t["text"])
+        if not title:
+            continue
+        hits = sum(1 for w in title if any(_word_match(w, m) for m in words))
+        need = 1 if len(title) == 1 else max(2, int(len(title) * 0.6))
+        if hits >= need:
+            out.append(i)
+    return out
+
+
+def is_close_tasks(text, chat_id=None):
+    """Intención de cerrar pendientes: verbo de cierre + (números, palabra de
+    tarea, o el título de una tarea de la última lista mostrada)."""
+    if not _CLOSE_VERB.search(text or ""):
+        return False
+    if re.search(r"\b\d{1,3}\b", text) or _TASK_WORD.search(text):
+        return True
+    return bool(_fuzzy_title_hits(text, LAST_TASKS.get(chat_id)))
+
+
+def close_tasks_flow(chat_id, text):
+    shown = LAST_TASKS.get(chat_id)
+    if not shown:
+        return ("Uy Juanchi, no tengo fresca la lista. Pídame primero los "
+                "pendientes («¿qué tengo pendiente?») y ahí sí me dice cuáles "
+                "cierro por número.")
+    # 1) números explícitos (con rangos «2 al 5»)
+    nums = set()
+    for a, b in _RANGE_RE.findall(text):
+        nums.update(range(int(a), int(b) + 1))
+    nums.update(int(n) for n in re.findall(r"\b(\d{1,3})\b", text))
+    picks = sorted(n for n in nums if 1 <= n <= len(shown))
+    # 2) «todas»
+    if not picks and re.search(r"\btod[oa]s\b", text, re.I):
+        picks = [i for i, t in enumerate(shown, start=1) if t]
+    # 3) por texto («ya hice la de pagar la renta»)
+    if not picks:
+        picks = _fuzzy_title_hits(text, shown)
+        if len(picks) > 1:
+            opciones = "\n".join(f"{n}. {shown[n-1]['text']}" for n in picks)
+            return ("Me suenan varias, Juanchi — ¿cuál(es) cierro? Dígame por "
+                    f"número:\n{opciones}")
+    if not picks:
+        return ("No identifiqué cuáles cerrar, Juanchi. Dígame los números de la "
+                "lista (ej. «cierra 2, 3 y 5») o «todas».")
+
+    items, already, out_sel = [], [], []
+    for n in picks:
+        t = shown[n - 1]
+        if t is None:
+            already.append(n)
+        else:
+            items.append((n, t))
+    res = serve_hud.close_tasks_bulk(
+        [{"path": t["path"], "line": t["line"], "text": t["text"]} for _, t in items]
+    ) if items else {"closed": 0, "failed": []}
+    failed_keys = {(f.get("path"), f.get("line")) for f in res.get("failed", [])}
+    ok_lines, fail_lines = [], []
+    for n, t in items:
+        if (t["path"], t["line"]) in failed_keys:
+            err = next((f.get("error", "") for f in res.get("failed", [])
+                        if (f.get("path"), f.get("line")) == (t["path"], t["line"])), "")
+            fail_lines.append(f"✗ {n}. {t['text']} ({err})")
+        else:
+            ok_lines.append(f"✓ {n}. {t['text']}")
+            shown[n - 1] = None   # numeración estable para cierres siguientes
+    parts = []
+    if ok_lines:
+        parts.append("Listo Juanchi, cerradas de una:\n" + "\n".join(ok_lines))
+        cm.log_event("accion", detalle=f"Pendientes cerrados via bot: "
+                     + "; ".join(l[2:] for l in ok_lines))
+    if already:
+        parts.append("Ya estaban cerradas: " + ", ".join(str(n) for n in already))
+    if fail_lines:
+        parts.append("Estas no pude (la nota cambió):\n" + "\n".join(fail_lines))
+    quedan = sum(1 for t in shown if t)
+    parts.append(f"Le quedan {quedan} de esa lista." if quedan
+                 else "¡Esa lista quedó limpia, parce! 🎉")
+    return "\n\n".join(parts)
 
 
 def ask_core(chat_id, text):
@@ -576,6 +726,8 @@ def _ask_core_inner(chat_id, text):
         return reminder_create_flow(text)
     if is_cal_create(text):
         return cal_create_flow(text)
+    if is_close_tasks(text, chat_id):
+        return close_tasks_flow(chat_id, text)
     # historial: solo turnos user/assistant (el contexto inyectado es por-llamada)
     hist = histories.setdefault(chat_id, [])
     # Un "estatus del día" jala TODO lo conectado (agenda + recordatorios + pendientes).
@@ -595,7 +747,7 @@ def _ask_core_inner(chat_id, text):
         except Exception:
             pass
     if is_task_query(text) or status:
-        ctx = task_context(text)
+        ctx = task_context(text, chat_id)
         if ctx:
             msgs.append({"role": "system", "content": ctx})
     try:
