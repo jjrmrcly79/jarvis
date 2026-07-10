@@ -537,46 +537,134 @@ def cal_create_flow(text):
             f"{loc} (iCloud). Ya está en su Mac.")
 
 
+PERSONAL_ROOT = os.environ.get("JARVIS_PERSONAL_ROOT", "Personal")
+
+_NUM_HINT = ("\nMuestra los pendientes numerados EXACTAMENTE con estos números "
+             "(no los reordenes ni renumeres). El usuario puede cerrarlos "
+             "diciendo «cierra 2 y 5» o «ya hice la de …».")
+
+
+def _work_group(rel_dir_parts):
+    """Agrupa un pendiente de trabajo por cliente/proyecto: el segmento
+    después de 'Clientes' si existe; si no, la primera subcarpeta."""
+    parts = list(rel_dir_parts)
+    if "Clientes" in parts:
+        i = parts.index("Clientes")
+        if i + 1 < len(parts):
+            return parts[i + 1]
+    return parts[0] if parts else "(raíz)"
+
+
+def _work_roots(data):
+    """Raíces del vault que NO son personales y tienen pendientes abiertos."""
+    return [p["name"] for p in data["projects"]
+            if p["open"] and p["name"] != "(raíz)"
+            and p["name"].lower() != PERSONAL_ROOT.lower()]
+
+
+def _grouped_work(data):
+    """{raíz: {grupo: [tareas]}} de todas las ramas de trabajo."""
+    out = {}
+    for root in _work_roots(data):
+        d = serve_hud.project_tasks(root, limit=500)
+        groups = {}
+        for t in d["tasks"]:
+            rel = Path(t["path"]).relative_to(serve_hud.VAULT / root)
+            groups.setdefault(_work_group(rel.parts[:-1]), []).append(t)
+        out[root] = groups
+    return out
+
+
+def _work_summary_lines(data, grouped):
+    """Líneas de resumen por raíz de trabajo: total, vencidos y conteo por cliente."""
+    lines = []
+    for root, groups in grouped.items():
+        total = sum(len(ts) for ts in groups.values())
+        vencidas = sum(1 for ts in groups.values() for t in ts
+                       if t["due"] and t["due"] < data["today"])
+        gtxt = " · ".join(f"{g} {len(ts)}" for g, ts in
+                          sorted(groups.items(), key=lambda x: -len(x[1]))[:6])
+        lines.append(f"🏢 {root}: {total} abiertos"
+                     + (f" ({vencidas} vencidos)" if vencidas else "")
+                     + (f" — {gtxt}" if gtxt else ""))
+    return lines
+
+
+def _numbered(shown, with_due_flag=None):
+    return "\n".join(
+        f"{i}. {t['text']}"
+        + (f" (📅 {t['due']}{' VENCIDA' if with_due_flag and t['due'] < with_due_flag else ''})"
+           if t["due"] else "")
+        for i, t in enumerate(shown, start=1))
+
+
 def task_context(text, chat_id=None):
     """Datos reales de pendientes (determinista, sin alucinar).
 
-    Numera la lista y la guarda en LAST_TASKS[chat_id] para que
-    «cierra 2, 3 y 5» se resuelva de forma determinista contra
-    exactamente lo que se le mostró al usuario.
+    Default: PERSONALES en detalle numerado + trabajo (Nexia, etc.) en
+    resumen por cliente. «pendientes de nexia/mapartel» → esa rama en
+    detalle. «todos» → todo mezclado. La lista numerada se guarda en
+    LAST_TASKS[chat_id] para que «cierra 2 y 5» sea determinista.
     """
-    _NUM_HINT = ("\nMuestra los pendientes numerados EXACTAMENTE con estos números "
-                 "(no los reordenes ni renumeres). El usuario puede cerrarlos "
-                 "diciendo «cierra 2 y 5» o «ya hice la de …».")
     try:
+        low = (text or "").lower()
         data = serve_hud.scan_tasks()
-        projs = {p["name"].lower(): p["name"] for p in data["projects"]}
-        for low, name in projs.items():
-            if low in text.lower():
-                d = serve_hud.project_tasks(name)
+
+        # 1) raíz explícita («pendientes de nexia», «personales»)
+        for p in data["projects"]:
+            name = p["name"]
+            if name != "(raíz)" and name.lower() in low:
+                d = serve_hud.project_tasks(name, limit=500)
                 shown = d["tasks"]
                 if chat_id is not None:
                     LAST_TASKS[chat_id] = list(shown)
-                lines = "\n".join(
-                    f"{i}. {t['text']}" + (f" (📅 {t['due']})" if t["due"] else "")
-                    for i, t in enumerate(shown, start=1))
                 return (f"DATOS REALES de Obsidian — pendientes ABIERTOS de {d['project']} "
-                        f"({d['open']} total):\n{lines}" + _NUM_HINT)
-        # lista general: vencidas → vencen hoy → recientes (sin duplicar)
-        shown, seen = [], set()
-        for t in data["overdue"] + data["due_today"] + data["recent"]:
-            key = (t["path"], t["line"])
-            if key not in seen:
-                seen.add(key)
-                shown.append(t)
+                        f"({d['open']} total):\n" + _numbered(shown, data["today"])
+                        + _NUM_HINT)
+
+        grouped = _grouped_work(data)
+
+        # 2) cliente/proyecto explícito («pendientes de mapartel»)
+        for root, groups in grouped.items():
+            for g, tasks in groups.items():
+                if len(g) >= 4 and g.lower() in low:
+                    if chat_id is not None:
+                        LAST_TASKS[chat_id] = list(tasks)
+                    return (f"DATOS REALES de Obsidian — pendientes ABIERTOS de {g} "
+                            f"({root}, {len(tasks)} total):\n"
+                            + _numbered(tasks, data["today"]) + _NUM_HINT)
+
+        # 3) «todos» → vista completa mezclada
+        if re.search(r"\btod[oa]s\b", low):
+            shown, seen = [], set()
+            for t in data["overdue"] + data["due_today"] + data["recent"]:
+                key = (t["path"], t["line"])
+                if key not in seen:
+                    seen.add(key)
+                    shown.append(t)
+            if chat_id is not None:
+                LAST_TASKS[chat_id] = list(shown)
+            s = f"DATOS REALES de Obsidian (hoy {data['today']}):\n"
+            s += f"Total pendientes: {data['total_open']}\n"
+            s += "Pendientes (vencidas primero):\n" + "\n".join(
+                f"{i}. [{t['project']}] {t['text']}"
+                + (f" (📅 {t['due']})" if t["due"] else "")
+                for i, t in enumerate(shown, start=1))
+            return s + _NUM_HINT
+
+        # 4) default: personal en detalle + trabajo resumido
+        d = serve_hud.project_tasks(PERSONAL_ROOT, limit=500)
+        shown = d["tasks"]
         if chat_id is not None:
             LAST_TASKS[chat_id] = list(shown)
         s = f"DATOS REALES de Obsidian (hoy {data['today']}):\n"
-        s += f"Total pendientes: {data['total_open']}\n"
-        s += "Por proyecto: " + ", ".join(f"{p['name']}={p['open']}" for p in data["projects"]) + "\n"
-        s += "Pendientes (vencidas primero):\n" + "\n".join(
-            f"{i}. [{t['project']}] {t['text']}"
-            + (f" (📅 {t['due']}{' VENCIDA' if t['due'] < data['today'] else ''})" if t["due"] else "")
-            for i, t in enumerate(shown, start=1))
+        s += f"PENDIENTES PERSONALES ({d['open']} abiertos):\n"
+        s += _numbered(shown, data["today"]) or "(ninguno)"
+        wl = _work_summary_lines(data, grouped)
+        if wl:
+            s += ("\n\nRESUMEN DE TRABAJO (menciónalo tal cual en 1-2 líneas al "
+                  "final, SIN detallar tareas; si quiere el detalle que pida "
+                  "«pendientes de Nexia» o del cliente):\n" + "\n".join(wl))
         return s + _NUM_HINT
     except Exception:
         return None
