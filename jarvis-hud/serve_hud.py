@@ -29,6 +29,8 @@ TTS_LENGTH_SCALE = float(os.environ.get("JARVIS_TTS_SPEED", "1.06"))
 ELEVEN_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
 ELEVEN_VOICE = os.environ.get("JARVIS_ELEVEN_VOICE", "EXAVITQu4vr4xnSDxMaL")
 ELEVEN_MODEL = os.environ.get("JARVIS_ELEVEN_MODEL", "eleven_multilingual_v2")
+# Velocidad de la voz (rango válido ElevenLabs: 0.7–1.2; 1.0 = natural)
+ELEVEN_SPEED = float(os.environ.get("JARVIS_ELEVEN_SPEED", "1.1"))
 _tts_voice = None
 _tts_lock = threading.Lock()  # la sesión onnxruntime no es segura en concurrencia
 
@@ -55,7 +57,8 @@ def _eleven_wav_bytes(text):
     req = urllib.request.Request(
         "https://api.elevenlabs.io/v1/text-to-speech/"
         f"{ELEVEN_VOICE}?output_format=pcm_22050",
-        data=json.dumps({"text": text, "model_id": ELEVEN_MODEL}).encode(),
+        data=json.dumps({"text": text, "model_id": ELEVEN_MODEL,
+                         "voice_settings": {"speed": ELEVEN_SPEED}}).encode(),
         headers={"xi-api-key": ELEVEN_KEY, "Content-Type": "application/json"},
     )
     # El Python de python.org en macOS no trae los certificados del sistema

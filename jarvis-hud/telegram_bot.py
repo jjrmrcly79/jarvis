@@ -1034,14 +1034,25 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("🤔 No alcancé a entender nada del audio, señor.")
         return
 
-    cls = await asyncio.to_thread(vn.classify, text, _extract_complete)
-    state = {"text": text, "area": cls["area"], "person": cls["person"],
-             "resumen": cls["resumen"], "confidence": cls["confidence"],
-             "candidates": cls["candidates"], "audio": str(ogg),
-             "tg_voice_msg_id": update.message.message_id,
-             "source": "Telegram", "chat_id": chat_id}
-    await msg.delete()
-    await _send_card(ctx.bot, chat_id, state)
+    # «toma nota…» dictado → flujo de notas de siempre (archiva audio + nota)
+    if is_note_capture(text):
+        note = _NOTE_PREFIX.sub("", text).strip() or text
+        cls = await asyncio.to_thread(vn.classify, note, _extract_complete)
+        state = {"text": note, "area": cls["area"], "person": cls["person"],
+                 "resumen": cls["resumen"], "confidence": cls["confidence"],
+                 "candidates": cls["candidates"], "audio": str(ogg),
+                 "tg_voice_msg_id": update.message.message_id,
+                 "source": "Telegram", "chat_id": chat_id}
+        await msg.delete()
+        await _send_card(ctx.bot, chat_id, state)
+        return
+
+    # Conversación: el audio es un mensaje más para Jarvis
+    # (mismo pipeline que texto: recordatorios, estatus, correo, ask_core…)
+    await msg.edit_text(f"🗣️ «{text}»")
+    await ctx.bot.send_chat_action(chat_id, "typing")
+    reply = await asyncio.to_thread(ask_core, chat_id, text)
+    await reply_with_voice(update, chat_id, reply)
 
 
 async def on_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
