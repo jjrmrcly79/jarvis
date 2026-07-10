@@ -629,6 +629,166 @@ def mail_context(limit: int = 40):
             + "\n".join(lines))
 
 
+def mail_search_context(query: str, days: int = 90, limit: int = 12):
+    """Busca en el HISTORIAL de correo (remitente/asunto) vía Envelope Index,
+    incluyendo el snippet del cuerpo que Mail cachea (tabla summaries).
+    Para «¿qué me ha escrito X?» / «busca correos de Y». None si nada."""
+    import sqlite3
+    import time as _time
+    from datetime import datetime
+    query = (query or "").strip()
+    if not query:
+        return None
+    try:
+        from openjarvis.tools.mail_read import _find_envelope_index
+        db = _find_envelope_index()
+    except Exception:
+        db = None
+    if db is None:
+        return None
+    cutoff = _time.time() - days * 86400
+    sql = (
+        "SELECT m.read, m.date_received, m.subject_prefix, s.subject, "
+        "COALESCE(NULLIF(a.comment, ''), a.address), su.summary "
+        "FROM messages m "
+        "LEFT JOIN addresses a ON a.ROWID = m.sender "
+        "LEFT JOIN subjects s ON s.ROWID = m.subject "
+        "LEFT JOIN mailboxes mb ON mb.ROWID = m.mailbox "
+        "LEFT JOIN summaries su ON su.ROWID = m.summary "
+        "WHERE m.deleted = 0 AND mb.url LIKE '%/INBOX' "
+        "AND m.date_received >= ? "
+        "AND (s.subject LIKE ? OR a.address LIKE ? OR a.comment LIKE ?) "
+        "ORDER BY m.date_received DESC LIMIT ?"
+    )
+    like = f"%{query}%"
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro&immutable=1", uri=True, timeout=5.0)
+        try:
+            rows = conn.execute(sql, (cutoff, like, like, like, max(1, limit))).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    if not rows:
+        return (f"DATOS REALES del correo: no encontré correos que mencionen "
+                f"«{query}» (remitente o asunto) en los últimos {days} días.")
+    lines = []
+    for read_flag, epoch, prefix, subject, sender, snippet in rows:
+        try:
+            cuando = datetime.fromtimestamp(int(epoch)).strftime("%d-%b-%Y %H:%M")
+        except (TypeError, ValueError, OSError):
+            cuando = "?"
+        subj = ((prefix or "") + (subject or "")).strip() or "(sin asunto)"
+        mark = "•SIN LEER " if not read_flag else ""
+        lines.append(f"- {mark}{(sender or '(desconocido)').strip()} — {subj} ({cuando})")
+        if snippet:
+            body = " ".join(str(snippet).split())[:300]
+            if body:
+                lines.append(f"    «{body}»")
+    return (f"CORREOS REALES que mencionan «{query}» (últimos {days} días, "
+            f"{len(rows)} resultados, del más reciente al más viejo; el texto entre "
+            f"comillas es el inicio del cuerpo). Responde usando SOLO estos datos:\n"
+            + "\n".join(lines))
+
+
+# ---------- Búsqueda en la memoria indexada del vault (memory.db FTS) ----------
+MEMORY_DB = Path.home() / ".openjarvis" / "memory.db"
+
+
+def knowledge_context(query: str, limit: int = 6, per_chars: int = 600):
+    """Busca en el índice FTS del vault (memory.db del núcleo) y devuelve los
+    fragmentos más relevantes. Complementa entity_context: sirve para temas que
+    NO son un proyecto/cliente con MOC («¿qué sé de X?»). None si nada."""
+    import sqlite3
+    query = (query or "").strip()
+    if not query or not MEMORY_DB.exists():
+        return None
+    # tokens citados y unidos con AND (precisión); si no pega, reintenta con OR
+    toks = [t for t in re.findall(r"[\wáéíóúñüÁÉÍÓÚÑÜ]+", query) if len(t) >= 3]
+    if not toks:
+        return None
+    results = []
+    try:
+        conn = sqlite3.connect(f"file:{MEMORY_DB}?mode=ro", uri=True, timeout=5.0)
+        try:
+            for joiner in (" AND ", " OR "):
+                match = joiner.join(f'"{t}"' for t in toks[:6])
+                results = conn.execute(
+                    "SELECT source, snippet(documents_fts, 0, '»', '«', '…', 32) "
+                    "FROM documents_fts WHERE documents_fts MATCH ? "
+                    "ORDER BY rank LIMIT ?", (match, limit)).fetchall()
+                if results:
+                    break
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    if not results:
+        return None
+    lines, seen = [], set()
+    for source, frag in results:
+        try:
+            rel = str(Path(source).relative_to(VAULT))
+        except Exception:
+            rel = Path(source).name
+        frag = " ".join((frag or "").split())[:per_chars]
+        key = (rel, frag[:80])
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"- [{rel}]\n    {frag}")
+    return (f"DATOS REALES de tus notas de Obsidian (índice de memoria, "
+            f"búsqueda «{query}»). Los fragmentos marcan »así« lo que coincide. "
+            f"Responde usando SOLO esto y cita de qué nota sale:\n" + "\n".join(lines))
+
+
+# ---------- Panel 🧠 Memoria del HUD (log del día + diario + búsqueda) ----------
+def memory_today_data():
+    """Resumen del día para el panel Memoria: intercambios, notas archivadas,
+    acciones, briefs enviados y compromisos abiertos del diario."""
+    import chat_memory as cm   # módulo hermano (jarvis-hud/)
+    events = cm.read_day()
+    chats = sum(1 for e in events if e.get("kind") == "chat")
+    notas = [{"hora": e.get("ts", "")[11:16], "area": e.get("area", ""),
+              "title": e.get("title") or "Inbox"}
+             for e in events if e.get("kind") == "nota"]
+    acciones = [{"hora": e.get("ts", "")[11:16], "detalle": e.get("detalle", "")}
+                for e in events if e.get("kind") == "accion"]
+    briefs = [e.get("tipo", "") for e in events if e.get("kind") == "brief"]
+    diary = cm.DIARY_DIR / (date.today().isoformat() + ".md")
+    compromisos, diario_rel = [], None
+    if diary.exists():
+        try:
+            diario_rel = str(diary.relative_to(cm.VAULT))
+        except Exception:
+            diario_rel = diary.name
+        in_comp = False
+        try:
+            for ln in diary.read_text(encoding="utf-8").splitlines():
+                if ln.startswith("## "):
+                    in_comp = ln.startswith("## Compromisos")
+                    continue
+                if in_comp and ln.strip().startswith("- [ ]"):
+                    compromisos.append(ln.strip()[5:].strip())
+        except OSError:
+            pass
+    return {"chats": chats, "notas": notas, "acciones": acciones,
+            "briefs": briefs, "compromisos": compromisos, "diario": diario_rel}
+
+
+def unified_search(query: str, days: int = 180):
+    """Búsqueda unificada para el HUD: correo histórico + notas del vault."""
+    try:
+        mail = mail_search_context(query, days=days, limit=8)
+    except Exception:
+        mail = None
+    try:
+        notas = knowledge_context(query, limit=6)
+    except Exception:
+        notas = None
+    return {"query": query, "mail": mail or "", "notas": notas or ""}
+
+
 # ---------- Recordatorios de Mac (Reminders.app, lectura + escritura) ----------
 _REM_READ_SCRIPT = '''on run
   set out to ""
@@ -1365,6 +1525,26 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._send_json({"ok": False, "error": str(e)}, 500)
 
+    def _serve_memory(self):
+        try:
+            self._send_json(memory_today_data())
+        except Exception as e:
+            self._send_json({"chats": 0, "notas": [], "acciones": [],
+                             "briefs": [], "compromisos": [], "diario": None,
+                             "error": str(e)}, 500)
+
+    def _serve_search(self):
+        try:
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            q = (qs.get("q", [""])[0] or "").strip()
+            if not q:
+                self._send_json({"query": "", "mail": "", "notas": ""}, 400)
+                return
+            self._send_json(unified_search(q))
+        except Exception as e:
+            self._send_json({"query": "", "mail": "", "notas": "",
+                             "error": str(e)}, 500)
+
     def do_GET(self):
         if self.path.startswith("/calendar"):
             self._serve_calendar()
@@ -1384,6 +1564,10 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_reminders()
         elif self.path.startswith("/mail"):
             self._serve_mail()
+        elif self.path.startswith("/memory"):
+            self._serve_memory()
+        elif self.path.startswith("/search"):
+            self._serve_search()
         elif self.path.startswith("/tts"):
             self._serve_tts()
         elif self._is_proxy():
