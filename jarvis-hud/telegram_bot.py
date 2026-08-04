@@ -22,6 +22,7 @@ import serve_hud   # reutiliza el escáner de pendientes (scan_tasks/project_tas
 import voice_notes as vn  # transcripción + clasificación + archivado de notas de voz
 import chat_memory as cm  # log persistente de conversaciones + diario en Obsidian
 import onboarding as ob   # entrevista inicial → Perfil (Jarvis).md en el vault
+import plant_tracker as pt  # tracker diario del rol en planta (Mapartel)
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
@@ -1160,6 +1161,7 @@ TOUR = (
     "· «¿qué tengo en Nexia?» → pendientes por proyecto\n\n"
     "*Automático*\n"
     "· ☀️ 7:00 brief de la mañana · 🌙 21:00 cierre + diario en Obsidian\n"
+    "· 🏭 /dia tracker de planta · checkpoints con aviso de atrasos\n"
     "· Todo lo que hablamos queda en su diario (`/diario` lo genera ya)\n"
     "· /brief a demanda · /dios modo Claude · /voz respuestas habladas\n\n"
     "Su perfil vive en `Personal/Segundo Cerebro/` y guía mis prioridades. "
@@ -1622,9 +1624,11 @@ async def _send_brief(bot, kind):
 async def daily_briefs(app):
     """Tarea de fondo: brief a las BRIEF_MORNING y cierre a las BRIEF_EVENING.
     Estado en disco para no duplicar tras reinicios (KeepAlive respawnea seguido).
-    Si la Mac dormía a la hora exacta, se envía al despertar (con ventana)."""
+    Si la Mac dormía a la hora exacta, se envía al despertar (con ventana).
+    También dispara los checkpoints del tracker de planta (retro de atrasos)."""
     print(f"[brief] briefs proactivos {'activos' if BRIEFS_ON else 'APAGADOS'} "
-          f"(mañana {BRIEF_MORNING}, noche {BRIEF_EVENING})", flush=True)
+          f"(mañana {BRIEF_MORNING}, noche {BRIEF_EVENING}; "
+          f"checkpoints planta {', '.join(TRACKER_CHECKPOINTS) or '—'})", flush=True)
     while True:
         try:
             if BRIEFS_ON:
@@ -1642,9 +1646,69 @@ async def daily_briefs(app):
                         _brief_mark("evening", today)
                         # con el día cerrado, refresca el índice del vault
                         await asyncio.to_thread(_run_vault_sync)
+                await _tracker_checkpoints(app.bot, now)
         except Exception as e:
             print(f"[brief] loop: {e}", flush=True)
         await asyncio.sleep(60)
+
+
+# -------- Checkpoints del tracker de planta (Mapartel) ---------------------------
+TRACKER_CHECKPOINTS = [s.strip() for s in os.environ.get(
+    "JARVIS_TRACKER_CHECKPOINTS", "11:30,14:30,17:45").split(",") if s.strip()]
+TRACKER_STATE = Path.home() / ".openjarvis" / "tracker_state.json"
+_TRACKER_WINDOW_MIN = 90   # si la Mac dormía, el checkpoint vale hasta 90 min después
+
+
+def _tracker_state():
+    try:
+        return json.loads(TRACKER_STATE.read_text())
+    except Exception:
+        return {}
+
+
+async def _tracker_checkpoints(bot, now):
+    """En cada checkpoint: si el tracker del día tiene atrasos, avisa.
+    Silencio si no hay tracker o si todo va en tiempo."""
+    chat = _owner_chat()
+    if not chat:
+        return
+    today = now.date().isoformat()
+    st = _tracker_state()
+    sent = set(st.get(today, []))
+    now_m = now.hour * 60 + now.minute
+    for cp in TRACKER_CHECKPOINTS:
+        if cp in sent:
+            continue
+        try:
+            h, m = cp.split(":")
+            cp_m = int(h) * 60 + int(m)
+        except ValueError:
+            continue
+        if not (cp_m <= now_m < cp_m + _TRACKER_WINDOW_MIN):
+            continue
+        # marca ANTES de mandar: un error de red no debe repetir el checkpoint
+        sent.add(cp)
+        TRACKER_STATE.write_text(json.dumps({today: sorted(sent)}))
+        try:
+            msg = await asyncio.to_thread(pt.feedback, now)
+            if msg:
+                await bot.send_message(int(chat), msg, parse_mode="Markdown")
+                cm.log_event("accion", chat_id=int(chat),
+                             detalle=f"Checkpoint planta {cp}: atrasos avisados")
+        except Exception as e:
+            print(f"[tracker] checkpoint {cp}: {e}", flush=True)
+
+
+async def cmd_dia(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/dia — estatus completo del tracker de planta de hoy."""
+    if not await gate(update):
+        return
+    await ctx.bot.send_chat_action(update.effective_chat.id, "typing")
+    text = await asyncio.to_thread(pt.resumen)
+    try:
+        await update.message.reply_text(text, parse_mode="Markdown")
+    except Exception:
+        await update.message.reply_text(text)
 
 
 async def cmd_brief(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1704,6 +1768,7 @@ def build_app():
     app.add_handler(CommandHandler("nota", cmd_nota))
     app.add_handler(CommandHandler("brief", cmd_brief))
     app.add_handler(CommandHandler("diario", cmd_diario))
+    app.add_handler(CommandHandler("dia", cmd_dia))
     app.add_handler(CommandHandler("onboarding", cmd_onboarding))
     app.add_handler(CallbackQueryHandler(on_ob_button, pattern=r"^ob\|"))
     app.add_handler(CallbackQueryHandler(on_button, pattern=r"^vn\|"))
