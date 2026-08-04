@@ -23,22 +23,41 @@ VAULT = Path(os.environ.get(
     "VAULT",
     str(Path.home() / "Library/Mobile Documents/iCloud~md~obsidian/Documents")))
 
+# Bóveda del cliente Mapartel (rol Gerente de Operaciones, arranque 2026-08-03).
+# Vive en iCloud Drive, FUERA del vault raíz de Obsidian.
+MAPARTEL_ROOT = Path(os.environ.get(
+    "JARVIS_MAPARTEL_VAULT",
+    str(Path.home() / "Library/Mobile Documents/com~apple~CloudDocs/NEXIA/Mapartel(cliente)")))
+
 # --- Áreas y dónde vive el MD de cada persona ---------------------------------
+# "sesiones": si el área lo define y la nota NO es de una persona, se archiva
+# como transcripción cruda fechada ahí (convención 70_Sesiones/Crudas del rol).
 AREAS = {
     "personal":     {"label": "Personal",
                      "personas": VAULT / "Personal/05-Relaciones/personas"},
     "nexia":        {"label": "Nexia",
                      "personas": VAULT / "Nexia/Personas"},
+    "mapartel":     {"label": "Mapartel (GO)",
+                     "personas": MAPARTEL_ROOT / "50_Personas (Restringido)",
+                     "sesiones": MAPARTEL_ROOT / "70_Sesiones/Crudas"},
     "villacatania": {"label": "Villa Catania",
                      "personas": VAULT / "VillaCataniaVault/Comunidad/01_Directorio"},
 }
 
 # Pistas de área por palabra clave (fallback determinista, sin acentos/minúsculas)
 AREA_HINTS = {
-    "nexia": ["nexia", "cliente", "mapartel", "bohn", "borgwarner", "lensys",
+    "mapartel": ["mapartel", "jorge", "ivonne", "pamela", "maribel",
+                 "juan carlos", "nayeli", "lidia", "junta de las 8", "junta 8:30",
+                 "gemba", "piso", "produccion", "smt", "pth", "ola 2", "crisol",
+                 "horacio", "hora por hora", "hora x hora", "tablero", "paro",
+                 "almacen", "inventario", "programa de produccion", "oee",
+                 "scrap", "advanta", "erp", "linea base", "mandato", "compuerta",
+                 "gerencia", "gerente de operaciones", "direccion", "operadora",
+                 "turno", "capacitacion", "mantenimiento", "calidad"],
+    "nexia": ["nexia", "cliente", "bohn", "borgwarner", "lensys",
               "capistrano", "consultoria", "lean", "vsm", "smed", "heijunka",
               "supabase", "n8n", "app", "automatizacion", "pdca", "factura",
-              "daniel", "prospecto", "planta", "proceso", "kpi"],
+              "daniel", "prospecto", "proceso", "kpi"],
     "villacatania": ["villa catania", "catania", "condominio", "fraccionamiento",
                      "asamblea", "cuota", "vecino", "vecinos", "administracion",
                      "comite", "mantenimiento", "caseta", "porton", "alberca",
@@ -86,6 +105,10 @@ def people_registry() -> dict:
             name = p.stem
             if name.startswith("_") or name.lower().startswith("inbox"):
                 continue
+            # notas fechadas o de reglas (p.ej. "00 - LEEME", "2026-07-27 - …")
+            # no son fichas de persona — típico en 50_Personas (Restringido)
+            if re.match(r"^\d", name):
+                continue
             reg[_strip(name)] = {"name": name, "area": area_key, "path": p}
     return reg
 
@@ -127,16 +150,26 @@ def classify(text: str, complete=None) -> dict:
     reg = people_registry()
     person_entry, person_area = _match_person(text, reg)
 
+    # Guard de sesiones largas: una grabación extensa es una junta/sesión, no
+    # una nota sobre la persona mencionada — no forzar área/persona por nombre.
+    es_sesion = len(text or "") > 900
+    if es_sesion:
+        person_entry, person_area = None, None
+
     # 1) LLM (ayuda, no manda): área + persona + resumen breve
     llm = {}
     if complete:
         try:
             sys_p = ("Eres un clasificador. Lee la nota y responde SOLO un JSON: "
-                     '{"area":"personal|nexia|villacatania","persona":"nombre o null",'
+                     '{"area":"personal|nexia|mapartel|villacatania","persona":"nombre o null",'
                      '"resumen":"1 frase"}. '
-                     "nexia=trabajo/clientes/consultoría/apps. "
+                     "mapartel=planta Mapartel donde Juan es Gerente de Operaciones: "
+                     "juntas, piso, producción, almacén, dirección (Jorge/Ivonne/"
+                     "Pamela/Maribel), Horacio, capacidad, inventario. "
+                     "nexia=consultoría NEXIA/otros clientes/apps propias. "
                      "villacatania=condominio/vecinos/asamblea/cuotas. "
-                     "personal=familia/salud/amigos/casa.")
+                     "personal=familia/salud/amigos/casa. "
+                     "Si es la grabación de una junta o sesión de trabajo, persona=null.")
             raw = complete([{"role": "system", "content": sys_p},
                             {"role": "user", "content": text[:2000]}])
             m = re.search(r"\{[\s\S]*\}", raw)
@@ -185,10 +218,34 @@ def file_note(area: str, person: str | None, text: str,
               when: datetime | None = None, source: str = "voz",
               resumen: str = "", icon: str = "🎙️") -> dict:
     """Agrega una sección fechada al MD de la persona (lo crea si no existe).
-    Si person es None → va al 'Inbox de voz.md' del área."""
+    Si person es None → 'Inbox de voz.md' del área, EXCEPTO si el área define
+    "sesiones": ahí la nota se guarda como transcripción cruda fechada
+    (convención 70_Sesiones/Crudas de la Gerencia de Operaciones Mapartel)."""
     if area not in AREAS:
         return {"ok": False, "error": f"área desconocida: {area}"}
     when = when or datetime.now()
+
+    # --- sesión cruda (área con carpeta de sesiones y sin persona) -----------
+    if not person and AREAS[area].get("sesiones"):
+        folder = AREAS[area]["sesiones"]
+        folder.mkdir(parents=True, exist_ok=True)
+        tema = _safe_filename(resumen)[:60] if resumen else f"Nota de voz {when:%H%M}"
+        target = folder / f"{when:%Y-%m-%d} - CRUDA - {tema}.md"
+        n = 2
+        while target.exists():
+            target = folder / f"{when:%Y-%m-%d} - CRUDA - {tema} ({n}).md"
+            n += 1
+        fm = (f"---\ntipo: transcripcion\narea: general\nfecha: {when:%Y-%m-%d}\n"
+              f"estado: crudo\norigen: {source}\n---\n\n"
+              f"# {when:%Y-%m-%d} · {icon} {tema}\n\n"
+              f"> Capturada por Jarvis ({source}, {when:%H:%M}). "
+              f"Procesar a nota limpia en 70_Sesiones/Procesadas.\n\n"
+              f"{text.strip()}\n")
+        target.write_text(fm, encoding="utf-8")
+        return {"ok": True, "path": str(target), "rel": _rel(target),
+                "nuevo": True, "area_label": AREAS[area]["label"],
+                "title": target.stem}
+
     folder = AREAS[area]["personas"]
     folder.mkdir(parents=True, exist_ok=True)
 
@@ -205,7 +262,13 @@ def file_note(area: str, person: str | None, text: str,
     nuevo = not target.exists()
     if nuevo:
         fm = (f"---\ntipo: {tipo}\narea: {AREAS[area]['label']}\n"
-              f"creado: {when:%Y-%m-%d}\n---\n\n# {title}\n")
+              f"creado: {when:%Y-%m-%d}\n")
+        if area == "mapartel":
+            fm += "restringido: true\n"
+        fm += f"---\n\n# {title}\n"
+        if area == "mapartel" and tipo == "persona":
+            fm += ("\n> 🔒 Capa restringida — hechos con fecha, separados de la "
+                   "interpretación. Nada de aquí se cita fuera de la carpeta.\n")
         target.write_text(fm, encoding="utf-8")
 
     head = f"## {when:%Y-%m-%d %H:%M} · {icon} {source}"
@@ -215,9 +278,18 @@ def file_note(area: str, person: str | None, text: str,
     with target.open("a", encoding="utf-8") as f:
         f.write(body)
 
-    rel = target.relative_to(VAULT)
-    return {"ok": True, "path": str(target), "rel": str(rel),
+    return {"ok": True, "path": str(target), "rel": _rel(target),
             "nuevo": nuevo, "area_label": AREAS[area]["label"], "title": title}
+
+
+def _rel(target: Path) -> str:
+    """Ruta legible: relativa al vault de Obsidian o a la bóveda Mapartel."""
+    for root, prefix in ((VAULT, ""), (MAPARTEL_ROOT, "Mapartel(cliente)/")):
+        try:
+            return prefix + str(target.relative_to(root))
+        except ValueError:
+            continue
+    return str(target)
 
 
 # --- archivar el audio (mover, reversible) ------------------------------------

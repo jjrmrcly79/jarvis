@@ -1052,10 +1052,13 @@ def _preview(txt, n=600):
 def _card_markup(token, state):
     """Tarjeta inicial: confirmar la propuesta, cambiar área, u otra persona."""
     area_label = vn.AREAS[state["area"]]["label"]
-    who = state["person"] or "Inbox"
+    who = state["person"] or ("Sesión" if vn.AREAS[state["area"]].get("sesiones")
+                              else "Inbox")
     rows = [[InlineKeyboardButton(f"✅ {area_label} · {who}", callback_data=f"vn|ok|{token}")]]
     rows.append([InlineKeyboardButton(vn.AREAS[k]["label"], callback_data=f"vn|area|{k}|{token}")
-                 for k in ("personal", "nexia", "villacatania")])
+                 for k in ("mapartel", "nexia")])
+    rows.append([InlineKeyboardButton(vn.AREAS[k]["label"], callback_data=f"vn|area|{k}|{token}")
+                 for k in ("personal", "villacatania")])
     rows.append([InlineKeyboardButton("👤 Otra persona", callback_data=f"vn|name|{token}")])
     return InlineKeyboardMarkup(rows)
 
@@ -1067,7 +1070,9 @@ def _people_markup(token, state):
     for i in range(0, len(cands), 2):
         rows.append([InlineKeyboardButton(c, callback_data=f"vn|pick|{j}|{token}")
                      for j, c in enumerate(cands[i:i+2], start=i)])
-    rows.append([InlineKeyboardButton("📥 Inbox del área", callback_data=f"vn|inbox|{token}"),
+    inbox_label = ("🎙️ Sesión (Crudas)" if vn.AREAS[state["area"]].get("sesiones")
+                   else "📥 Inbox del área")
+    rows.append([InlineKeyboardButton(inbox_label, callback_data=f"vn|inbox|{token}"),
                  InlineKeyboardButton("👤 Otra persona", callback_data=f"vn|name|{token}")])
     return InlineKeyboardMarkup(rows)
 
@@ -1080,7 +1085,9 @@ def _del_markup(token):
 
 def _card_text(state):
     area_label = vn.AREAS[state["area"]]["label"]
-    who = state["person"] or "Inbox del área"
+    who = state["person"] or ("Sesión (Crudas)"
+                              if vn.AREAS[state["area"]].get("sesiones")
+                              else "Inbox del área")
     conf = {"high": "alta", "medium": "media", "low": "baja"}.get(state.get("confidence"), "—")
     head = f"🎙️ *Nota transcrita* · confianza {conf}\n\n{_preview(state['text'])}\n\n"
     return head + f"📂 Propuesta: *{area_label} · {who}*\n¿Dónde la archivo?"
