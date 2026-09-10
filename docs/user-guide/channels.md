@@ -215,6 +215,95 @@ jarvis channel send telegram "Build completed successfully"
 jarvis channel status
 ```
 
+### Connect a Live Channel (WhatsApp pairing)
+
+Start a channel in the foreground and stream incoming messages. For
+`whatsapp_baileys` this pairs your personal WhatsApp account: a QR code is
+printed to the terminal — scan it in WhatsApp under **Settings → Linked
+Devices → Link a Device**. After pairing, incoming messages are printed live
+until you press `Ctrl+C`.
+
+```bash
+jarvis channel connect --channel-type whatsapp_baileys
+```
+
+The pairing state is saved under `~/.openjarvis/whatsapp_baileys_bridge/auth/`,
+so subsequent connects reconnect automatically without a new QR scan. The
+Node.js bridge is built on first use (requires Node.js 22+ on `PATH`).
+
+### Extracting Tasks & Meetings from Incoming Messages
+
+Most to-dos and meetings arrive as chat messages. Add `--extract-tasks` to run
+each incoming message through the LLM and detect actionable **tasks** and
+**meetings**, which are appended to `~/.openjarvis/extracted_tasks.jsonl`:
+
+```bash
+jarvis channel connect --channel-type whatsapp_baileys --extract-tasks
+```
+
+Route the extracted items to where you already look:
+
+- `--to-reminders` (macOS) creates entries in **Reminders.app** — in the
+  `WhatsApp` list by default, configurable with `--reminders-list` — where the
+  HUD's agenda/reminders panels pick them up.
+- `--to-obsidian` appends **tasks** as `- [ ] Title 📅 YYYY-MM-DD` checkboxes to
+  an Obsidian note (`Bandeja de WhatsApp.md` by default, `--obsidian-note` to
+  change it), read by the HUD's pending-task scanner. The vault is taken from
+  `--vault`, then `$VAULT`, then the standard iCloud location. Meetings are not
+  written here.
+- `--to-calendar` (macOS) creates **meetings** as Calendar.app events in the
+  `Calendario` calendar (`--calendar` to change it; falls back to the first
+  calendar if that name doesn't exist).
+
+```bash
+# tasks → Reminders + Obsidian, meetings → Calendar
+jarvis channel connect --channel-type whatsapp_baileys \
+    --to-reminders --to-obsidian --to-calendar
+```
+
+Routing rules: **tasks** go to Reminders and/or Obsidian (both, if both flags
+are set). **Meetings** go to Calendar when `--to-calendar` is set; otherwise
+they go to Reminders. This keeps each item in the right HUD panel without
+duplicating meetings across Reminders and Calendar.
+
+Extraction uses the same engine/model resolution as `jarvis ask` (start Ollama
+or set a cloud API key). Relative dates like "mañana" or "el viernes" are
+resolved against the current date, and titles are kept in the message's original
+language.
+
+Review what has been extracted at any time:
+
+```bash
+jarvis channel inbox                 # most recent items
+jarvis channel inbox --kind meeting  # meetings only
+```
+
+### Always-on background service (macOS)
+
+To keep the listener running without a terminal — starting at login and
+restarting on failure — install it as a launchd service. Run this from your
+OpenJarvis checkout:
+
+```bash
+jarvis channel service install       # installs + starts (uses --to-reminders --to-obsidian by default)
+jarvis channel service status        # is it running?
+jarvis channel service uninstall     # remove it
+```
+
+`install` writes a launch agent (`~/Library/LaunchAgents/com.openjarvis.whatsapp.plist`)
+and a wrapper script, then loads it. Logs go to
+`~/.openjarvis/whatsapp-service.log`. Task extraction still needs an engine in
+the background (run Ollama, or put a cloud key like `ANTHROPIC_API_KEY` in your
+`~/.zshrc` so the service inherits it). Don't also run `channel connect`
+manually while the service is on — two listeners share one WhatsApp session.
+
+Programmatically, the same pipeline is available via
+`openjarvis.channels.task_extraction.MessageTaskExtractor` (portable, JSONL
+store) with an optional `sink` callback for custom delivery. Bundled sinks in
+`openjarvis.channels.task_sinks` — `AppleRemindersSink` (macOS Reminders) and
+`ObsidianTasksSink` (checkboxes in a vault note) — can be composed with
+`combine_sinks(...)`.
+
 ---
 
 ## API Server Endpoints
@@ -530,7 +619,7 @@ If `ready` is `false`, the Messaging tab shows a "Disconnected" badge with a "Re
 `WhatsAppBaileysChannel` is registered as `"whatsapp_baileys"` in `ChannelRegistry` and provides **bidirectional WhatsApp messaging** using the Baileys protocol. It spawns a Node.js bridge subprocess that handles QR-code authentication, incoming message forwarding, and outbound message delivery.
 
 !!! warning "Node.js 22+ required"
-    The Baileys bridge is a compiled Node.js application bundled inside the package. It is auto-installed to `~/.openjarvis/whatsapp_baileys_bridge/` on first `connect()` call. If `node` is not found on `PATH`, `connect()` logs an error and sets the channel to `ChannelStatus.ERROR`.
+    The Baileys bridge ships as TypeScript source bundled inside the package. On the first `connect()` call it is copied to `~/.openjarvis/whatsapp_baileys_bridge/`, its dependencies are installed with `npm install`, and it is compiled with `tsc` — all automatically. Subsequent connects reuse the build. If `node`/`npm` are not found on `PATH`, `connect()` logs an error and sets the channel to `ChannelStatus.ERROR`.
 
 !!! note "WhatsApp account required"
     WhatsApp does not offer an official API for personal accounts. Baileys operates on the WhatsApp Web protocol. You must scan a QR code with your WhatsApp mobile app to authenticate on first use.

@@ -228,6 +228,12 @@
     <div class="readout dash" id="rem-readout"><div class="drow"><span class="dt">cargando…</span></div></div>
     <div class="label dash-sep">✉️ Correos <span class="dash-c" id="mail-c"></span></div>
     <div class="readout dash" id="mail-readout"><div class="drow"><span class="dt">cargando…</span></div></div>
+    <div class="label dash-sep">🧠 Memoria <span class="dash-c" id="mem-c"></span></div>
+    <div class="readout dash" id="mem-readout"><div class="drow"><span class="dt">cargando…</span></div></div>
+    <div class="label dash-sep">🔎 Buscar en correo + notas</div>
+    <input id="srch-inp" placeholder="p. ej. Marco, stripe, ley silla… (Enter)" autocomplete="off"
+           style="width:100%;margin-top:4px;background:rgba(0,255,255,.05);border:1px solid rgba(0,255,255,.25);border-radius:4px;color:inherit;font:inherit;font-size:.85em;padding:5px 8px;outline:none" />
+    <div class="readout dash" id="srch-readout" style="display:none;max-height:34vh;overflow-y:auto"></div>
   </div>
 
   <!-- conversation -->
@@ -245,7 +251,7 @@
 
 <script>
 const API = location.origin;          // mismo origen que el servidor
-let MODEL = "qwen3.5:27b";
+let MODEL = "claude-opus-5";
 let speakOn = true;
 let history = [{role:"system", content:
   "Eres J.A.R.V.I.S, el asistente personal de tu jefe. Respondes en español, con tono sereno, "+
@@ -656,7 +662,54 @@ async function loadMail(){
   }catch(e){ dashEmpty(document.getElementById('mail-readout'),'sin acceso a Mail'); }
 }
 
-function loadDashboard(){ loadAgenda(); loadReminders(); loadMail(); }
+/* ---------- 🧠 MEMORIA (log del día + diario) ---------- */
+async function loadMemoria(){
+  const box=document.getElementById('mem-readout');
+  try{
+    const j=await (await fetch(API+'/memory')).json();
+    document.getElementById('mem-c').textContent = j.chats ? j.chats+' turnos' : '';
+    let html='<div class="drow"><span class="dt">💬 '+(j.chats||0)+' intercambios · 📝 '+
+             (j.notas||[]).length+' notas · ⚙️ '+(j.acciones||[]).length+' acciones'+
+             ((j.briefs&&j.briefs.length)?' · 📣 '+j.briefs.join('+'):'')+'</span></div>';
+    (j.notas||[]).slice(-3).forEach(n=>{ html+='<div class="drow ditem"><span class="dt">📝 '+
+      escapeHtml(trunc(n.area+' · '+n.title,30))+'</span><span class="dwhen">'+n.hora+'</span></div>'; });
+    (j.acciones||[]).slice(-3).forEach(a=>{ html+='<div class="drow ditem"><span class="dt">⚙️ '+
+      escapeHtml(trunc(a.detalle,34))+'</span><span class="dwhen">'+a.hora+'</span></div>'; });
+    if(j.compromisos&&j.compromisos.length){
+      html+='<div class="drow"><span class="dt" style="color:var(--cyan)">Compromisos abiertos ('+j.compromisos.length+')</span></div>';
+      j.compromisos.slice(0,5).forEach(c=>{ html+='<div class="drow ditem"><span class="dt">☐ '+
+        escapeHtml(trunc(c,38))+'</span></div>'; });
+    }
+    if(j.diario) html+='<div class="drow"><span class="dt" style="opacity:.65">📓 '+escapeHtml(j.diario)+'</span></div>';
+    box.innerHTML=html;
+  }catch(e){ dashEmpty(box,'memoria no disponible'); }
+}
+
+/* ---------- 🔎 BÚSQUEDA UNIFICADA (correo histórico + vault) ---------- */
+function searchBlock(txt){
+  let lines=(txt||'').split('\n');
+  if(lines.length>1) lines.shift();          // quita el encabezado para el LLM
+  return '<div style="font-size:.8em;line-height:1.45;opacity:.92;white-space:pre-wrap;'+
+         'border-left:2px solid rgba(0,255,255,.3);padding-left:8px;margin:4px 0">'+
+         escapeHtml(lines.join('\n'))+'</div>';
+}
+async function doUnifiedSearch(){
+  const q=document.getElementById('srch-inp').value.trim();
+  const box=document.getElementById('srch-readout');
+  if(!q){ box.style.display='none'; return; }
+  box.style.display='block';
+  box.innerHTML='<div class="dempty">buscando «'+escapeHtml(q)+'»…</div>';
+  try{
+    const j=await (await fetch(API+'/search?q='+encodeURIComponent(q))).json();
+    let html='';
+    if(j.mail)  html+='<div class="drow"><span class="dt" style="color:var(--cyan)">✉️ CORREO</span></div>'+searchBlock(j.mail);
+    if(j.notas) html+='<div class="drow"><span class="dt" style="color:var(--cyan)">📚 NOTAS</span></div>'+searchBlock(j.notas);
+    box.innerHTML=html||'<div class="dempty">sin resultados para «'+escapeHtml(q)+'»</div>';
+  }catch(e){ box.innerHTML='<div class="dempty">error de búsqueda</div>'; }
+}
+document.getElementById('srch-inp').addEventListener('keydown',e=>{ if(e.key==='Enter') doUnifiedSearch(); });
+
+function loadDashboard(){ loadAgenda(); loadReminders(); loadMail(); loadMemoria(); }
 
 async function loadAllTasks(){
   const box=document.getElementById('tasks-list');

@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from openjarvis.channels._stubs import (
     BaseChannel,
@@ -25,6 +25,11 @@ from openjarvis.core.events import EventBus, EventType
 from openjarvis.core.registry import ChannelRegistry
 
 logger = logging.getLogger(__name__)
+
+# Callback receiving the raw QR-code string emitted during pairing.
+QRHandler = Callable[[str], None]
+# Callback receiving raw stderr lines from the bridge subprocess.
+StderrHandler = Callable[[str], None]
 
 # Path to the bundled bridge shipped inside the package.
 # In editable installs this lives next to this file; in wheel installs
@@ -76,9 +81,13 @@ class WhatsAppBaileysChannel(BaseChannel):
         self._assistant_has_own_number = assistant_has_own_number
         self._bus = bus
         self._handlers: List[ChannelHandler] = []
+        self._qr_handlers: List[QRHandler] = []
+        self._stderr_handler: Optional[StderrHandler] = None
+        self._progress_handler: Optional[StderrHandler] = None
         self._status = ChannelStatus.DISCONNECTED
         self._process: Optional[subprocess.Popen] = None
         self._reader_thread: Optional[threading.Thread] = None
+        self._stderr_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._runtime_dir = _DEFAULT_RUNTIME_DIR
         self._last_qr: str = ""
@@ -86,58 +95,167 @@ class WhatsAppBaileysChannel(BaseChannel):
     # -- bridge lifecycle -------------------------------------------------------
 
     def _ensure_bridge(self) -> Path:
-        """Copy bundled bridge to runtime dir and run ``npm install`` if needed.
+        """Provision the runtime dir and return the path to ``dist/bridge.js``.
 
-        Returns the path to ``dist/bridge.js``.
+        The bundled bridge ships as TypeScript source.  This copies it to the
+        runtime directory, runs ``npm install``, and compiles it with ``tsc``
+        when a pre-built ``dist/`` is not available.  Steps are skipped when
+        their outputs are already present so repeated ``connect()`` calls are
+        cheap.
 
         Raises
         ------
         RuntimeError
-            If ``node`` is not found on ``PATH``.
+            If ``node``/``npm`` are not on ``PATH`` or the build fails.
         """
         if shutil.which("node") is None:
             raise RuntimeError(
                 "Node.js is required for WhatsAppBaileysChannel but 'node' "
-                "was not found on PATH.  Install Node.js 22+ and try again."
+                "was not found on PATH.  Install Node.js 18+ and try again."
             )
 
         runtime = self._runtime_dir
         runtime.mkdir(parents=True, exist_ok=True)
 
-        # Copy package.json + dist/ from bundled source if not already present,
-        # or if the bundled version is newer.
-        pkg_dst = runtime / "package.json"
-        pkg_src = _BRIDGE_SRC / "package.json"
-        if pkg_src.exists() and (
-            not pkg_dst.exists() or pkg_src.stat().st_mtime > pkg_dst.stat().st_mtime
-        ):
-            shutil.copy2(pkg_src, pkg_dst)
+        # Copy manifests + sources from the bundled bridge when newer/missing.
+        for name in ("package.json", "package-lock.json", "tsconfig.json"):
+            src = _BRIDGE_SRC / name
+            dst = runtime / name
+            if src.exists() and (
+                not dst.exists() or src.stat().st_mtime > dst.stat().st_mtime
+            ):
+                shutil.copy2(src, dst)
 
+        # A pre-compiled dist/ takes precedence; otherwise copy the TS sources
+        # so we can build them locally.
         dist_dst = runtime / "dist"
         dist_src = _BRIDGE_SRC / "dist"
         if dist_src.exists():
             if dist_dst.exists():
                 shutil.rmtree(dist_dst)
             shutil.copytree(dist_src, dist_dst)
-
-        # Run npm install if node_modules is missing.
-        node_modules = runtime / "node_modules"
-        if not node_modules.exists():
-            logger.info("Running npm install in %s", runtime)
-            subprocess.run(
-                ["npm", "install", "--production"],
-                cwd=str(runtime),
-                check=True,
-                capture_output=True,
-            )
+        else:
+            src_dst = runtime / "src"
+            src_src = _BRIDGE_SRC / "src"
+            if src_src.exists():
+                if src_dst.exists():
+                    shutil.rmtree(src_dst)
+                shutil.copytree(src_src, src_dst)
 
         bridge_js = runtime / "dist" / "bridge.js"
+        needs_build = not bridge_js.exists()
+
+        # Rebuild if the copied TypeScript source is newer than the last build
+        # (e.g. after an OpenJarvis upgrade ships an updated bridge).
+        if not needs_build and not dist_src.exists() and src_dst.exists():
+            build_mtime = bridge_js.stat().st_mtime
+            if any(
+                p.is_file() and p.stat().st_mtime > build_mtime
+                for p in src_dst.rglob("*")
+            ):
+                needs_build = True
+
+        # Install dependencies when missing, out of date (manifests newer than
+        # the last install, e.g. after a bridge upgrade), or lacking the dev
+        # tools needed to (re)compile the TypeScript.
+        node_modules = runtime / "node_modules"
+        tsc_bin = node_modules / ".bin" / "tsc"
+        deps_stale = self._deps_stale(runtime, node_modules)
+        if not node_modules.exists() or deps_stale:
+            install_cmd = ["npm", "install"]
+            if not needs_build and not deps_stale:
+                install_cmd.append("--production")
+            logger.info("Running %s in %s", " ".join(install_cmd), runtime)
+            self._progress(
+                "Installing WhatsApp bridge dependencies (this can take 1-2 min)…"
+            )
+            self._run_npm(install_cmd, runtime, "npm install", timeout=600.0)
+        elif needs_build and not tsc_bin.exists():
+            # A previous production-only install lacks the TypeScript compiler
+            # needed to rebuild; install the full dependency tree.
+            logger.info("Installing dev dependencies for rebuild in %s", runtime)
+            self._progress("Installing WhatsApp bridge build tools…")
+            self._run_npm(["npm", "install"], runtime, "npm install", timeout=600.0)
+
+        # Compile the TypeScript bridge if no dist/bridge.js exists yet.
+        if needs_build:
+            logger.info("Building WhatsApp bridge (tsc) in %s", runtime)
+            self._progress("Compiling WhatsApp bridge…")
+            self._run_npm(
+                ["npm", "run", "build"], runtime, "npm run build", timeout=300.0
+            )
+
+        self._progress("WhatsApp bridge ready — connecting…")
+
         if not bridge_js.exists():
             raise RuntimeError(
-                f"Bridge entry point not found at {bridge_js}.  "
-                "Ensure the bridge TypeScript has been compiled."
+                f"Bridge entry point not found at {bridge_js} after build.  "
+                "Ensure Node.js/npm are installed and the bridge compiled."
             )
         return bridge_js
+
+    @staticmethod
+    def _deps_stale(runtime: Path, node_modules: Path) -> bool:
+        """Return True if a manifest is newer than the installed node_modules.
+
+        Detects dependency changes (e.g. a bumped Baileys version after an
+        upgrade) so ``npm install`` re-runs instead of keeping stale packages.
+        """
+        if not node_modules.exists():
+            return True
+        nm_mtime = node_modules.stat().st_mtime
+        for manifest in ("package.json", "package-lock.json"):
+            path = runtime / manifest
+            if path.exists() and path.stat().st_mtime > nm_mtime:
+                return True
+        return False
+
+    def _progress(self, message: str) -> None:
+        """Report a setup-progress message to the handler (or the log)."""
+        if self._progress_handler is not None:
+            try:
+                self._progress_handler(message)
+                return
+            except Exception:
+                logger.debug("progress handler error", exc_info=True)
+        logger.info("%s", message)
+
+    def set_progress_handler(self, handler: Optional[StderrHandler]) -> None:
+        """Route bridge setup-progress messages (install/build) to *handler*.
+
+        Lets a foreground CLI surface the otherwise-silent first-run npm
+        install and TypeScript build.  Pass ``None`` to restore logging.
+        """
+        self._progress_handler = handler
+
+    @staticmethod
+    def _run_npm(
+        cmd: List[str], cwd: Path, label: str, *, timeout: float = 600.0
+    ) -> None:
+        """Run an npm command, raising a helpful RuntimeError on failure."""
+        try:
+            subprocess.run(
+                cmd,
+                cwd=str(cwd),
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "npm was not found on PATH.  Install Node.js 18+ (which "
+                "includes npm) and try again."
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"{label} timed out after {int(timeout)}s.  Check your network "
+                f"connection and that npm works, then retry.  You can also run "
+                f"it manually in {cwd}."
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            raise RuntimeError(f"{label} failed:\n{stderr}") from exc
 
     # -- BaseChannel interface ---------------------------------------------------
 
@@ -172,6 +290,11 @@ class WhatsAppBaileysChannel(BaseChannel):
                 daemon=True,
             )
             self._reader_thread.start()
+            self._stderr_thread = threading.Thread(
+                target=self._stderr_loop,
+                daemon=True,
+            )
+            self._stderr_thread.start()
             logger.info(
                 "WhatsApp Baileys bridge started (pid=%s)",
                 self._process.pid,
@@ -201,6 +324,10 @@ class WhatsAppBaileysChannel(BaseChannel):
         if self._reader_thread is not None:
             self._reader_thread.join(timeout=5.0)
             self._reader_thread = None
+
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=5.0)
+            self._stderr_thread = None
 
         self._status = ChannelStatus.DISCONNECTED
 
@@ -243,6 +370,28 @@ class WhatsAppBaileysChannel(BaseChannel):
         """Register a callback for incoming messages."""
         self._handlers.append(handler)
 
+    def on_qr(self, handler: QRHandler) -> None:
+        """Register a callback fired with each pairing QR-code string.
+
+        The callback receives the raw QR payload emitted by the bridge during
+        WhatsApp *Linked Devices* pairing.  Render it as a QR code (e.g. with
+        the ``qrcode`` package) for the user to scan.
+        """
+        self._qr_handlers.append(handler)
+
+    def get_qr(self) -> str:
+        """Return the most recently received pairing QR string (or "")."""
+        return self._last_qr
+
+    def set_stderr_handler(self, handler: Optional[StderrHandler]) -> None:
+        """Route the bridge subprocess's stderr lines to *handler*.
+
+        The bundled bridge renders a scannable ASCII QR code to stderr during
+        pairing, so a foreground CLI can surface it by forwarding these lines.
+        Pass ``None`` to restore the default (debug logging).
+        """
+        self._stderr_handler = handler
+
     # -- internal helpers -------------------------------------------------------
 
     def _write_command(self, cmd: Dict[str, Any]) -> None:
@@ -280,6 +429,34 @@ class WhatsAppBaileysChannel(BaseChannel):
                 logger.debug("Reader loop error", exc_info=True)
                 self._status = ChannelStatus.ERROR
 
+    def _stderr_loop(self) -> None:
+        """Background thread: drain the bridge's stderr.
+
+        Draining prevents the subprocess from blocking when its stderr pipe
+        fills.  Lines are forwarded to ``_stderr_handler`` when one is set
+        (used by the CLI to surface the scannable QR the bridge renders) and
+        otherwise logged at debug level.
+        """
+        proc = self._process
+        if proc is None or proc.stderr is None:
+            return
+
+        try:
+            for raw_line in proc.stderr:
+                if self._stop_event.is_set():
+                    break
+                line = raw_line.rstrip("\n")
+                if self._stderr_handler is not None:
+                    try:
+                        self._stderr_handler(line)
+                    except Exception:
+                        logger.debug("stderr handler error", exc_info=True)
+                elif line.strip():
+                    logger.debug("bridge stderr: %s", line)
+        except Exception:
+            if not self._stop_event.is_set():
+                logger.debug("stderr loop error", exc_info=True)
+
     def _handle_bridge_event(self, event: Dict[str, Any]) -> None:
         """Dispatch a single JSON event from the bridge."""
         event_type = event.get("type", "")
@@ -295,6 +472,11 @@ class WhatsAppBaileysChannel(BaseChannel):
         elif event_type == "qr":
             self._last_qr = event.get("data", "")
             logger.info("WhatsApp QR code received -- scan to authenticate")
+            for handler in self._qr_handlers:
+                try:
+                    handler(self._last_qr)
+                except Exception:
+                    logger.exception("WhatsApp Baileys QR handler error")
 
         elif event_type == "message":
             cm = ChannelMessage(
@@ -320,8 +502,16 @@ class WhatsAppBaileysChannel(BaseChannel):
                     },
                 )
 
+        elif event_type == "info":
+            message = event.get("message", "")
+            if message:
+                logger.info("Bridge: %s", message)
+                self._progress(message)
+
         elif event_type == "error":
-            logger.error("Bridge error: %s", event.get("message", "unknown"))
+            message = event.get("message", "unknown")
+            logger.error("Bridge error: %s", message)
+            self._progress(f"WhatsApp bridge error: {message}")
             self._status = ChannelStatus.ERROR
 
     def _publish_sent(self, channel: str, content: str, conversation_id: str) -> None:

@@ -17,13 +17,20 @@ CORE = os.environ.get("JARVIS_CORE", "http://127.0.0.1:8000")
 HUD_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html")
 PROXY_PREFIXES = ("/v1", "/health", "/dashboard", "/agents", "/models")
 
-# ---------- TTS (Piper · voz neuronal local, $0, offline) ----------
+# ---------- TTS (ElevenLabs primario · Piper local $0 de respaldo) ----------
 import io, wave, threading
 TTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tts")
 TTS_MODEL = os.environ.get(
     "JARVIS_TTS_MODEL", os.path.join(TTS_DIR, "es_AR-daniela-high.onnx"))
 # length_scale > 1 = más pausada/elegante; ajustable sin tocar código
 TTS_LENGTH_SCALE = float(os.environ.get("JARVIS_TTS_SPEED", "1.06"))
+# ElevenLabs: si hay API key en el entorno se usa como voz principal;
+# la key vive SOLO en los plists de launchd (el repo es público upstream).
+ELEVEN_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
+ELEVEN_VOICE = os.environ.get("JARVIS_ELEVEN_VOICE", "EXAVITQu4vr4xnSDxMaL")
+ELEVEN_MODEL = os.environ.get("JARVIS_ELEVEN_MODEL", "eleven_multilingual_v2")
+# Velocidad de la voz (rango válido ElevenLabs: 0.7–1.2; 1.0 = natural)
+ELEVEN_SPEED = float(os.environ.get("JARVIS_ELEVEN_SPEED", "1.1"))
 _tts_voice = None
 _tts_lock = threading.Lock()  # la sesión onnxruntime no es segura en concurrencia
 
@@ -45,16 +52,62 @@ def _tts_normalize(text):
     return _JARVIS_RE.sub("Jarvis", text or "")
 
 
-def synth_wav_bytes(text):
-    """Sintetiza `text` a WAV (bytes) con la voz Piper. Carga el modelo una vez."""
+def _eleven_wav_bytes(text):
+    """Sintetiza con ElevenLabs (PCM 22050 → WAV). Lanza excepción si falla."""
+    req = urllib.request.Request(
+        "https://api.elevenlabs.io/v1/text-to-speech/"
+        f"{ELEVEN_VOICE}?output_format=pcm_22050",
+        data=json.dumps({"text": text, "model_id": ELEVEN_MODEL,
+                         "voice_settings": {"speed": ELEVEN_SPEED}}).encode(),
+        headers={"xi-api-key": ELEVEN_KEY, "Content-Type": "application/json"},
+    )
+    # El Python de python.org en macOS no trae los certificados del sistema
+    # → usar el bundle de certifi (ya viene en el venv vía httpx).
+    import ssl
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        ctx = ssl.create_default_context()
+    with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+        pcm = resp.read()
+    if not pcm:
+        raise RuntimeError("ElevenLabs devolvió audio vacío")
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)   # PCM 16-bit
+        wf.setframerate(22050)
+        wf.writeframes(pcm)
+    return buf.getvalue()
+
+
+def _piper_wav_bytes(text):
+    """Sintetiza con la voz Piper local. Carga el modelo una vez."""
     from piper.config import SynthesisConfig
     voice = _get_tts_voice()
     cfg = SynthesisConfig(length_scale=TTS_LENGTH_SCALE)
     buf = io.BytesIO()
     with _tts_lock:
         with wave.open(buf, "wb") as wf:
-            voice.synthesize_wav(_tts_normalize(text), wf, cfg)
+            voice.synthesize_wav(text, wf, cfg)
     return buf.getvalue()
+
+
+def synth_wav_bytes(text):
+    """Sintetiza `text` a WAV (bytes): ElevenLabs si hay key, Piper de respaldo.
+
+    Fail-open: cualquier error de ElevenLabs (red, cuota agotada, plan) cae a
+    la voz local sin romper al usuario.
+    """
+    clean = _tts_normalize(text)
+    if ELEVEN_KEY:
+        try:
+            return _eleven_wav_bytes(clean)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[tts] ElevenLabs falló ({exc}); usando Piper local",
+                  file=sys.stderr)
+    return _piper_wav_bytes(clean)
 
 VAULT = Path(os.environ.get(
     "VAULT",
@@ -627,6 +680,166 @@ def mail_context(limit: int = 40):
             f"usando SOLO estos datos reales — no inventes ni sugieras comandos de "
             f"terminal. Si pregunta por no leídos, lista los marcados '•SIN LEER':\n"
             + "\n".join(lines))
+
+
+def mail_search_context(query: str, days: int = 90, limit: int = 12):
+    """Busca en el HISTORIAL de correo (remitente/asunto) vía Envelope Index,
+    incluyendo el snippet del cuerpo que Mail cachea (tabla summaries).
+    Para «¿qué me ha escrito X?» / «busca correos de Y». None si nada."""
+    import sqlite3
+    import time as _time
+    from datetime import datetime
+    query = (query or "").strip()
+    if not query:
+        return None
+    try:
+        from openjarvis.tools.mail_read import _find_envelope_index
+        db = _find_envelope_index()
+    except Exception:
+        db = None
+    if db is None:
+        return None
+    cutoff = _time.time() - days * 86400
+    sql = (
+        "SELECT m.read, m.date_received, m.subject_prefix, s.subject, "
+        "COALESCE(NULLIF(a.comment, ''), a.address), su.summary "
+        "FROM messages m "
+        "LEFT JOIN addresses a ON a.ROWID = m.sender "
+        "LEFT JOIN subjects s ON s.ROWID = m.subject "
+        "LEFT JOIN mailboxes mb ON mb.ROWID = m.mailbox "
+        "LEFT JOIN summaries su ON su.ROWID = m.summary "
+        "WHERE m.deleted = 0 AND mb.url LIKE '%/INBOX' "
+        "AND m.date_received >= ? "
+        "AND (s.subject LIKE ? OR a.address LIKE ? OR a.comment LIKE ?) "
+        "ORDER BY m.date_received DESC LIMIT ?"
+    )
+    like = f"%{query}%"
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro&immutable=1", uri=True, timeout=5.0)
+        try:
+            rows = conn.execute(sql, (cutoff, like, like, like, max(1, limit))).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    if not rows:
+        return (f"DATOS REALES del correo: no encontré correos que mencionen "
+                f"«{query}» (remitente o asunto) en los últimos {days} días.")
+    lines = []
+    for read_flag, epoch, prefix, subject, sender, snippet in rows:
+        try:
+            cuando = datetime.fromtimestamp(int(epoch)).strftime("%d-%b-%Y %H:%M")
+        except (TypeError, ValueError, OSError):
+            cuando = "?"
+        subj = ((prefix or "") + (subject or "")).strip() or "(sin asunto)"
+        mark = "•SIN LEER " if not read_flag else ""
+        lines.append(f"- {mark}{(sender or '(desconocido)').strip()} — {subj} ({cuando})")
+        if snippet:
+            body = " ".join(str(snippet).split())[:300]
+            if body:
+                lines.append(f"    «{body}»")
+    return (f"CORREOS REALES que mencionan «{query}» (últimos {days} días, "
+            f"{len(rows)} resultados, del más reciente al más viejo; el texto entre "
+            f"comillas es el inicio del cuerpo). Responde usando SOLO estos datos:\n"
+            + "\n".join(lines))
+
+
+# ---------- Búsqueda en la memoria indexada del vault (memory.db FTS) ----------
+MEMORY_DB = Path.home() / ".openjarvis" / "memory.db"
+
+
+def knowledge_context(query: str, limit: int = 6, per_chars: int = 600):
+    """Busca en el índice FTS del vault (memory.db del núcleo) y devuelve los
+    fragmentos más relevantes. Complementa entity_context: sirve para temas que
+    NO son un proyecto/cliente con MOC («¿qué sé de X?»). None si nada."""
+    import sqlite3
+    query = (query or "").strip()
+    if not query or not MEMORY_DB.exists():
+        return None
+    # tokens citados y unidos con AND (precisión); si no pega, reintenta con OR
+    toks = [t for t in re.findall(r"[\wáéíóúñüÁÉÍÓÚÑÜ]+", query) if len(t) >= 3]
+    if not toks:
+        return None
+    results = []
+    try:
+        conn = sqlite3.connect(f"file:{MEMORY_DB}?mode=ro", uri=True, timeout=5.0)
+        try:
+            for joiner in (" AND ", " OR "):
+                match = joiner.join(f'"{t}"' for t in toks[:6])
+                results = conn.execute(
+                    "SELECT source, snippet(documents_fts, 0, '»', '«', '…', 32) "
+                    "FROM documents_fts WHERE documents_fts MATCH ? "
+                    "ORDER BY rank LIMIT ?", (match, limit)).fetchall()
+                if results:
+                    break
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    if not results:
+        return None
+    lines, seen = [], set()
+    for source, frag in results:
+        try:
+            rel = str(Path(source).relative_to(VAULT))
+        except Exception:
+            rel = Path(source).name
+        frag = " ".join((frag or "").split())[:per_chars]
+        key = (rel, frag[:80])
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"- [{rel}]\n    {frag}")
+    return (f"DATOS REALES de tus notas de Obsidian (índice de memoria, "
+            f"búsqueda «{query}»). Los fragmentos marcan »así« lo que coincide. "
+            f"Responde usando SOLO esto y cita de qué nota sale:\n" + "\n".join(lines))
+
+
+# ---------- Panel 🧠 Memoria del HUD (log del día + diario + búsqueda) ----------
+def memory_today_data():
+    """Resumen del día para el panel Memoria: intercambios, notas archivadas,
+    acciones, briefs enviados y compromisos abiertos del diario."""
+    import chat_memory as cm   # módulo hermano (jarvis-hud/)
+    events = cm.read_day()
+    chats = sum(1 for e in events if e.get("kind") == "chat")
+    notas = [{"hora": e.get("ts", "")[11:16], "area": e.get("area", ""),
+              "title": e.get("title") or "Inbox"}
+             for e in events if e.get("kind") == "nota"]
+    acciones = [{"hora": e.get("ts", "")[11:16], "detalle": e.get("detalle", "")}
+                for e in events if e.get("kind") == "accion"]
+    briefs = [e.get("tipo", "") for e in events if e.get("kind") == "brief"]
+    diary = cm.DIARY_DIR / (date.today().isoformat() + ".md")
+    compromisos, diario_rel = [], None
+    if diary.exists():
+        try:
+            diario_rel = str(diary.relative_to(cm.VAULT))
+        except Exception:
+            diario_rel = diary.name
+        in_comp = False
+        try:
+            for ln in diary.read_text(encoding="utf-8").splitlines():
+                if ln.startswith("## "):
+                    in_comp = ln.startswith("## Compromisos")
+                    continue
+                if in_comp and ln.strip().startswith("- [ ]"):
+                    compromisos.append(ln.strip()[5:].strip())
+        except OSError:
+            pass
+    return {"chats": chats, "notas": notas, "acciones": acciones,
+            "briefs": briefs, "compromisos": compromisos, "diario": diario_rel}
+
+
+def unified_search(query: str, days: int = 180):
+    """Búsqueda unificada para el HUD: correo histórico + notas del vault."""
+    try:
+        mail = mail_search_context(query, days=days, limit=8)
+    except Exception:
+        mail = None
+    try:
+        notas = knowledge_context(query, limit=6)
+    except Exception:
+        notas = None
+    return {"query": query, "mail": mail or "", "notas": notas or ""}
 
 
 # ---------- Recordatorios de Mac (Reminders.app, lectura + escritura) ----------
@@ -1365,6 +1578,26 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:
             self._send_json({"ok": False, "error": str(e)}, 500)
 
+    def _serve_memory(self):
+        try:
+            self._send_json(memory_today_data())
+        except Exception as e:
+            self._send_json({"chats": 0, "notas": [], "acciones": [],
+                             "briefs": [], "compromisos": [], "diario": None,
+                             "error": str(e)}, 500)
+
+    def _serve_search(self):
+        try:
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            q = (qs.get("q", [""])[0] or "").strip()
+            if not q:
+                self._send_json({"query": "", "mail": "", "notas": ""}, 400)
+                return
+            self._send_json(unified_search(q))
+        except Exception as e:
+            self._send_json({"query": "", "mail": "", "notas": "",
+                             "error": str(e)}, 500)
+
     def do_GET(self):
         if self.path.startswith("/calendar"):
             self._serve_calendar()
@@ -1384,6 +1617,10 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_reminders()
         elif self.path.startswith("/mail"):
             self._serve_mail()
+        elif self.path.startswith("/memory"):
+            self._serve_memory()
+        elif self.path.startswith("/search"):
+            self._serve_search()
         elif self.path.startswith("/tts"):
             self._serve_tts()
         elif self._is_proxy():

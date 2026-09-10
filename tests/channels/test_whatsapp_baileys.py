@@ -255,6 +255,30 @@ class TestReaderLoop:
         ch._handle_bridge_event({"type": "error", "message": "something broke"})
         assert ch.status() == ChannelStatus.ERROR
 
+    def test_error_event_forwarded_to_progress(self):
+        ch = WhatsAppBaileysChannel()
+        received = []
+        ch.set_progress_handler(received.append)
+        ch._handle_bridge_event({"type": "error", "message": "network blocked"})
+        assert any("network blocked" in m for m in received)
+
+    def test_info_event_forwarded_to_progress(self):
+        ch = WhatsAppBaileysChannel()
+        received = []
+        ch.set_progress_handler(received.append)
+        ch._handle_bridge_event({"type": "info", "message": "WhatsApp Web version 2.3"})
+        assert received == ["WhatsApp Web version 2.3"]
+        # info must not change status
+        assert ch.status() == ChannelStatus.DISCONNECTED
+
+    def test_status_event_with_extra_fields(self):
+        ch = WhatsAppBaileysChannel()
+        # New bridge adds code/reason to disconnected status events.
+        ch._handle_bridge_event(
+            {"type": "status", "status": "disconnected", "code": 405, "reason": "x"}
+        )
+        assert ch.status() == ChannelStatus.DISCONNECTED
+
     def test_message_event_publishes_to_bus(self):
         bus = EventBus(record_history=True)
         ch = WhatsAppBaileysChannel(bus=bus)
@@ -331,3 +355,143 @@ class TestReaderLoop:
             }
         )
         bad_handler.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# QR handling
+# ---------------------------------------------------------------------------
+
+
+class TestQRHandling:
+    def test_on_qr_handler_invoked(self):
+        ch = WhatsAppBaileysChannel()
+        handler = MagicMock()
+        ch.on_qr(handler)
+
+        ch._handle_bridge_event({"type": "qr", "data": "qr-payload"})
+
+        handler.assert_called_once_with("qr-payload")
+        assert ch.get_qr() == "qr-payload"
+
+    def test_get_qr_empty_by_default(self):
+        ch = WhatsAppBaileysChannel()
+        assert ch.get_qr() == ""
+
+    def test_qr_handler_exception_does_not_crash(self):
+        ch = WhatsAppBaileysChannel()
+        ch.on_qr(MagicMock(side_effect=ValueError("boom")))
+
+        # Should not raise even if a handler blows up.
+        ch._handle_bridge_event({"type": "qr", "data": "qr-payload"})
+        assert ch.get_qr() == "qr-payload"
+
+
+# ---------------------------------------------------------------------------
+# stderr draining
+# ---------------------------------------------------------------------------
+
+
+class TestStderrLoop:
+    def test_stderr_forwarded_to_handler(self):
+        ch = WhatsAppBaileysChannel()
+        ch._stop_event = threading.Event()
+
+        received: list[str] = []
+        ch.set_stderr_handler(received.append)
+
+        mock_proc = MagicMock()
+        mock_proc.stderr = ["QR line one\n", "QR line two\n"]
+        ch._process = mock_proc
+
+        ch._stderr_loop()
+
+        assert received == ["QR line one", "QR line two"]
+
+    def test_stderr_loop_without_handler_does_not_crash(self):
+        ch = WhatsAppBaileysChannel()
+        ch._stop_event = threading.Event()
+
+        mock_proc = MagicMock()
+        mock_proc.stderr = ["some noise\n"]
+        ch._process = mock_proc
+
+        # No handler set -> falls back to debug logging, must not raise.
+        ch._stderr_loop()
+
+    def test_stderr_handler_exception_does_not_crash(self):
+        ch = WhatsAppBaileysChannel()
+        ch._stop_event = threading.Event()
+        ch.set_stderr_handler(MagicMock(side_effect=ValueError("boom")))
+
+        mock_proc = MagicMock()
+        mock_proc.stderr = ["line\n"]
+        ch._process = mock_proc
+
+        ch._stderr_loop()
+
+
+class TestProgressHandler:
+    def test_progress_forwarded_to_handler(self):
+        ch = WhatsAppBaileysChannel()
+        received = []
+        ch.set_progress_handler(received.append)
+        ch._progress("Installing…")
+        assert received == ["Installing…"]
+
+    def test_progress_falls_back_to_log_without_handler(self):
+        ch = WhatsAppBaileysChannel()
+        # No handler set -> must not raise.
+        ch._progress("Building…")
+
+    def test_progress_handler_exception_does_not_crash(self):
+        ch = WhatsAppBaileysChannel()
+        ch.set_progress_handler(MagicMock(side_effect=ValueError("boom")))
+        ch._progress("Building…")
+
+
+# ---------------------------------------------------------------------------
+# _ensure_bridge reuse of an existing build
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureBridgeReuse:
+    def test_uses_existing_build_without_npm(self, tmp_path):
+        ch = WhatsAppBaileysChannel()
+        ch._runtime_dir = tmp_path
+
+        (tmp_path / "node_modules").mkdir()
+        bridge_js = tmp_path / "dist" / "bridge.js"
+        bridge_js.parent.mkdir(parents=True, exist_ok=True)
+        bridge_js.write_text("// prebuilt bridge")
+
+        with (
+            patch("shutil.which", return_value="/usr/bin/node"),
+            patch.object(WhatsAppBaileysChannel, "_run_npm") as run_npm,
+        ):
+            result = ch._ensure_bridge()
+
+        assert result == bridge_js
+        run_npm.assert_not_called()
+
+
+class TestDepsStale:
+    def test_missing_node_modules_is_stale(self, tmp_path):
+        assert WhatsAppBaileysChannel._deps_stale(tmp_path, tmp_path / "node_modules")
+
+    def test_fresh_install_not_stale(self, tmp_path):
+        (tmp_path / "package.json").write_text("{}")
+        node_modules = tmp_path / "node_modules"
+        node_modules.mkdir()  # created after package.json -> newer
+        assert not WhatsAppBaileysChannel._deps_stale(tmp_path, node_modules)
+
+    def test_newer_manifest_is_stale(self, tmp_path):
+        node_modules = tmp_path / "node_modules"
+        node_modules.mkdir()
+        pkg = tmp_path / "package-lock.json"
+        pkg.write_text("{}")
+        # Make the manifest clearly newer than node_modules.
+        import os
+
+        future = node_modules.stat().st_mtime + 100
+        os.utime(pkg, (future, future))
+        assert WhatsAppBaileysChannel._deps_stale(tmp_path, node_modules)
