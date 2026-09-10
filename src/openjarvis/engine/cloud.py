@@ -30,6 +30,8 @@ PRICING: Dict[str, tuple[float, float]] = {
     "claude-sonnet-4-20250514": (3.00, 15.00),
     "claude-opus-4-20250514": (15.00, 75.00),
     "claude-haiku-3-5-20241022": (0.80, 4.00),
+    "claude-opus-5": (5.00, 25.00),
+    "claude-sonnet-5": (2.00, 10.00),
     "claude-opus-4-6": (5.00, 25.00),
     "claude-sonnet-4-6": (3.00, 15.00),
     "claude-haiku-4-5": (1.00, 5.00),
@@ -57,6 +59,8 @@ _OPENAI_MODELS = [
     "o3-mini",
 ]
 _ANTHROPIC_MODELS = [
+    "claude-opus-5",
+    "claude-sonnet-5",
     "claude-sonnet-4-20250514",
     "claude-opus-4-20250514",
     "claude-haiku-3-5-20241022",
@@ -535,10 +539,11 @@ class CloudEngine(InferenceEngine):
                 "openjarvis[inference-cloud]"
             )
         system_text, chat_msgs = self._prepare_anthropic_messages(messages)
+        # Claude 4.7+ / Opus 5 / Sonnet 5 rechazan `temperature` con 400:
+        # no se manda (el default del API es el correcto).
         create_kwargs: Dict[str, Any] = {
             "model": model,
             "messages": chat_msgs,
-            "temperature": temperature,
             "max_tokens": max_tokens,
         }
         if system_text:
@@ -1027,8 +1032,7 @@ class CloudEngine(InferenceEngine):
         create_kwargs: Dict[str, Any] = {
             "model": model,
             "messages": chat_msgs,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_tokens": max_tokens,  # sin temperature: Opus 5 / Sonnet 5 lo rechazan
         }
         if system_text:
             create_kwargs["system"] = system_text
@@ -1237,8 +1241,7 @@ class CloudEngine(InferenceEngine):
         create_kwargs: Dict[str, Any] = {
             "model": model,
             "messages": chat_msgs,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
+            "max_tokens": max_tokens,  # sin temperature: Opus 5 / Sonnet 5 lo rechazan
         }
         if system_text:
             create_kwargs["system"] = system_text

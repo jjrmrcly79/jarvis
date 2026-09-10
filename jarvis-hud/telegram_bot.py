@@ -3,7 +3,7 @@
 
 Habla con tu Jarvis desde el celular cuando no estás en la Mac.
 - Long-polling (no necesita IP pública ni abrir puertos).
-- Usa tu núcleo local (Ollama) CON memoria de Obsidian + pendientes.
+- Usa el núcleo (Claude Opus 5 vía API) CON memoria de Obsidian + pendientes.
 - Candado por chat ID: solo TÚ puedes usarlo (allowlist).
 
 La Mac debe estar encendida con el núcleo corriendo (`jarvis-hud` o el servicio).
@@ -34,13 +34,13 @@ if not TOKEN:
     sys.exit("Falta JARVIS_TG_TOKEN en el entorno "
              "(configúralo en el plist de launchd o expórtalo antes de correr).")
 CORE = os.environ.get("JARVIS_CORE", "http://127.0.0.1:8000")
-MODEL = os.environ.get("JARVIS_MODEL", "qwen3.5:27b")
+MODEL = os.environ.get("JARVIS_MODEL", "claude-opus-5")
 ALLOW_FILE = Path.home() / ".openjarvis" / "telegram_allowed.txt"
 
 # --- Modo dios (Claude API) -------------------------------------------------
-# Híbrido: Ollama por defecto (local, $0); "modo dios" enruta a Claude para
+# Desde 2026-09-10 el núcleo ya corre en Claude Opus 5; "modo dios" enruta a Claude directo para
 # tareas pesadas. Se prende/apaga por chat con /dios y /normal.
-GOD_MODEL = os.environ.get("JARVIS_GOD_MODEL", "claude-opus-4-8")
+GOD_MODEL = os.environ.get("JARVIS_GOD_MODEL", "claude-opus-5")
 GOD_MODE = {}            # chat_id -> bool (modo dios activo en ese chat)
 _claude_client = None    # cliente Anthropic perezoso (se crea al primer uso)
 
@@ -414,7 +414,7 @@ def _claude_complete(msgs, model=None, max_tokens=4096):
     """Responde con Claude API usando el mismo system+contexto+historial.
     Convierte el formato OpenAI (lista plana con 'system') al de Anthropic
     (system aparte, mensajes user/assistant). Lanza si falla — el llamador
-    hace fail-open a Ollama."""
+    hace fail-open al núcleo."""
     client = _get_claude()
     system_parts, conv = [], []
     for m in msgs:
@@ -967,19 +967,19 @@ async def cmd_dios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if GOD_MODE[chat_id]:
         await update.message.reply_text(
             f"🧠 Modo dios ACTIVADO, Juanchi — razono con {GOD_MODEL}. "
-            "Use /normal para volver al modelo local.")
+            "Use /normal para volver al núcleo.")
     else:
         await update.message.reply_text(
-            "🔌 Modo dios desactivado. Vuelvo al modelo local (Ollama), Juanchi.")
+            "🔌 Modo dios desactivado. Vuelvo al núcleo (Opus 5), Juanchi.")
 
 
 async def cmd_normal(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Vuelve al modelo local (Ollama) en este chat."""
+    """Vuelve al núcleo (Opus 5 vía API) en este chat."""
     if not await gate(update):
         return
     GOD_MODE[update.effective_chat.id] = False
     await update.message.reply_text(
-        "🔌 Modo local (Ollama) activo, Juanchi. Use /dios para el modo poderoso.")
+        "🔌 Modo núcleo (Opus 5) activo, Juanchi. Use /dios para el modo directo.")
 
 
 async def on_error(update: object, ctx: ContextTypes.DEFAULT_TYPE):
